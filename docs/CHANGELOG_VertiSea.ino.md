@@ -4,6 +4,42 @@ Newest first.
 
 ---
 
+## 2026-09-11 — Move the vendored Madgwick into the sketch folder so it is actually compiled — `[UNCONFIRMED]`
+
+**No behavioural change to the sketch's own code — but potentially a large change to what
+gets built.**
+
+`#include "MadgwickAHRS.h"` sat in `VertiSea/VertiSea.ino` while the header lived in
+`Madgwick/src/`, a **sibling of the sketch folder**. A quoted include searches the
+including file's directory first and then the compiler's `-I` paths; arduino-builder's
+paths cover the sketch folder, core, variant and sketchbook `libraries/` — never a sibling
+directory. The vendored copy was therefore invisible to the build, and the only way the
+sketch compiled at all was via a Library Manager install, which `README.md` and `AGENTS.md`
+both told the developer not to have while simultaneously claiming the vendored copy "takes
+precedence over any global Arduino install".
+
+That matters because the in-tree copy is a local fork: `betaDef` is 0.5f against upstream's
+0.1f. If the global copy was compiled, the AHRS gain was 5× lower than every comment in the
+firmware states — including the `setup()` TODO that proposes reducing it toward 0.05–0.1,
+which would then have been describing a change already made by accident. It also weakens
+the Issue 41 reasoning, which assumed beta = 0.5 masks the accel/gyro frame mismatch.
+
+`MadgwickAHRS.{h,cpp}` now sit beside the `.ino`. The `#include` line is unchanged; the
+placement is what fixes it, and it fixes three things at once: the quoted include can only
+resolve to the adjacent copy, arduino-builder never searches libraries for a header it can
+already find (so no duplicate symbols from a stray global install), and Arduino compiles
+every `.cpp` in the sketch folder automatically.
+
+Upstream packaging metadata moved to `archived/Madgwick-upstream/`. Keeping a second copy
+of the sources anywhere was rejected — that is the duplication failure that retired the
+MATLAB parser.
+
+**Action on the developer's machine:** delete any `Madgwick`/`MadgwickAHRS` library from
+the sketchbook `libraries/` folder, then rebuild. It is now unnecessary, and removing it is
+the only way to be certain which code runs. See Issue 58.
+
+---
+
 ## 2026-09-11 — Robust long-duration logging: SD recovery, ISR noise rejection, health record — `[UNCONFIRMED]`
 
 **Reported symptom:** on the bench the heartbeat LED blinks at 1 Hz to show SD logging is

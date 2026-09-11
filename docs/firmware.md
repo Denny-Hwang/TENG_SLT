@@ -26,7 +26,7 @@ the LED heartbeat and USB serial debug output.
 | `SparkFun_u-blox_GNSS_Arduino_Library` | u-blox GNSS (GPS) driver over I²C (UBX protocol) |
 | `SparkFun_ISM330DHCX` | ISM330DHCX 6-DOF IMU driver (used for both fixed and stabilized IMUs) |
 | `SparkFun_MMC5983MA_Arduino_Library` | MMC5983MA 3-axis magnetometer driver |
-| `MadgwickAHRS.h` | Madgwick AHRS filter (pitch, roll, yaw from IMU + optional mag) |
+| `MadgwickAHRS.h` | Madgwick AHRS filter (pitch, roll, yaw from IMU + optional mag). **Vendored in the sketch folder**, not a Library Manager install, and a local fork: `sampleFreqDef` 512→104, `betaDef` 0.1→**0.5**. See Issue 58 |
 
 ---
 

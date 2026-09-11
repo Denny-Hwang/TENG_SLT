@@ -149,7 +149,25 @@
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 #include <SparkFun_ISM330DHCX.h>
 #include <SparkFun_MMC5983MA_Arduino_Library.h>
-#include "MadgwickAHRS.h"   // vendored in Madgwick/src/ — takes precedence over any global Arduino library install
+// Vendored AHRS. The two source files sit in THIS folder (VertiSea/MadgwickAHRS.{h,cpp}),
+// not in a sibling directory, and that placement is load-bearing:
+//
+//   * A quoted #include searches the including file's own directory FIRST, so this line
+//     can only resolve to the copy beside it. That is what makes "takes precedence over a
+//     global install" true rather than merely intended.
+//   * Because the header is found in the sketch folder, arduino-builder never reports it
+//     missing and therefore never pulls a Madgwick library into the build — so there is no
+//     duplicate-symbol clash with a globally installed copy either.
+//   * Arduino compiles every .cpp in the sketch folder automatically, so MadgwickAHRS.cpp
+//     is built with the sketch.
+//
+// This copy is a LOCAL FORK of arduino-libraries/MadgwickAHRS 1.2.0, modified in two
+// places that materially change the filter's behaviour:
+//     sampleFreqDef  512.0f -> 104.0f   (seed only; retuned per-sample from measured dt)
+//     betaDef          0.1f ->   0.5f   (~12x the author's recommended AHRS gain)
+// Do NOT replace it with the Library Manager version, and do not install that version
+// alongside. See the beta TODO in setup() and IDENTIFIED_ISSUES.md Issue 41.
+#include "MadgwickAHRS.h"
 
 // =============================================================================
 //  DEPLOYMENT FLAGS — edit these before flashing

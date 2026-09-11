@@ -64,7 +64,7 @@ program (**Load BIN File**). That is the only maintained parser.
 | Path | What it is |
 |------|------------|
 | `VertiSea/VertiSea.ino` | Buoy firmware (Arduino sketch — **the folder name must match the sketch name**) |
-| `Madgwick/` | Vendored AHRS library; takes precedence over any global Arduino install |
+| `VertiSea/MadgwickAHRS.{h,cpp}` | Vendored AHRS, **inside the sketch folder** so the quoted `#include` resolves to it. A local fork of upstream 1.2.0 — see §4 |
 | `vertisea_protocol.py` | Packet layouts, SD `.BIN` parser and CSV export. **Stdlib only** — no GUI, no serial. Also a batch CLI |
 | `vertisea_plot_v7.py` | Ground station GUI. Imports the parser from `vertisea_protocol.py` |
 | `vertisea_plot_v7.bat` | Windows launcher for the GUI |
@@ -123,8 +123,26 @@ Install these libraries via the Arduino Library Manager:
 - SD (built-in, 1.3.0)
 - Wire, SPI (built-in)
 
-Madgwick AHRS is **vendored** in [`Madgwick/`](Madgwick/) — do not install the Library
-Manager copy, and do not let it shadow the vendored one.
+Madgwick AHRS is **vendored inside the sketch folder** as
+[`VertiSea/MadgwickAHRS.h`](VertiSea/MadgwickAHRS.h) and
+[`VertiSea/MadgwickAHRS.cpp`](VertiSea/MadgwickAHRS.cpp). Do **not** install the Library
+Manager copy — if you have one in your sketchbook `libraries/` folder, remove it.
+
+> **This is a local fork, not stock upstream.** Two constants differ from
+> arduino-libraries/MadgwickAHRS 1.2.0 and both change filter behaviour:
+>
+> | Constant | Upstream | Here | Effect |
+> |----------|----------|------|--------|
+> | `sampleFreqDef` | 512.0f | 104.0f | seed only — the filter is retuned every tick from the measured `dt` |
+> | `betaDef` | 0.1f | **0.5f** | ~12× the author's recommended AHRS gain; the filter behaves close to a smoothed accelerometer tilt sensor |
+>
+> `betaDef` in particular is untuned for wave-frequency dynamics (there is a `TODO` about
+> it in `setup()`), and it interacts with Issue 41 — read that before changing it.
+>
+> Until 2026-09-11 these files lived in a sibling `Madgwick/` folder, where **Arduino could
+> not see them** and a globally installed copy was silently compiled instead. See Issue 58.
+> The upstream packaging metadata is kept in
+> [`archived/Madgwick-upstream/`](archived/Madgwick-upstream/).
 
 Board: **SparkFun RedBoard Artemis Nano**. Install the SparkFun Apollo3 boards package
 (core 1.2.1) via the Boards Manager URL
@@ -558,7 +576,7 @@ The following **are** committed and should not be regenerated or overwritten:
 
 - [`Calibration/calibration.xlsx`](Calibration/calibration.xlsx) — offline calibration workbook
 - [`Calibration/accel_calibration_meas.txt`](Calibration/accel_calibration_meas.txt) — raw six-position accel measurements
-- [`Madgwick/`](Madgwick/) — vendored AHRS library
+- [`VertiSea/MadgwickAHRS.h`](VertiSea/MadgwickAHRS.h) and [`.cpp`](VertiSea/MadgwickAHRS.cpp) — vendored AHRS (a local fork; see §4)
 - Image assets in `docs/`
 
 > **Note on repository size:** ignoring `SampleData/` stops *future* growth, but the blobs

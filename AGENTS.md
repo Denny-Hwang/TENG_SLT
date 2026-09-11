@@ -222,5 +222,11 @@ These are **committed to the repository**. Do not regenerate, overwrite, or dele
 
 - `Calibration/calibration.xlsx` — offline calibration workbook.
 - `Calibration/accel_calibration_meas.txt` — raw six-position accel measurements.
-- `Madgwick/**` — vendored library; takes precedence over any global Arduino install.
+- `VertiSea/MadgwickAHRS.{h,cpp}` — vendored AHRS, deliberately **inside the sketch
+  folder**. A quoted `#include` searches the includer's own directory first, which is the
+  only reason "takes precedence over a global install" is true; it also stops
+  arduino-builder pulling in a library copy and producing duplicate symbols. Do not move
+  these back out (Issue 58), and note they are a **local fork** — `sampleFreqDef` 512→104
+  and `betaDef` 0.1→0.5 differ from upstream 1.2.0.
+- `archived/Madgwick-upstream/**` — the upstream packaging metadata, provenance only.
 - Image assets in `docs/` (`IMG_1770.jpeg`, `vertisea_system_diagram.png`, screenshots).

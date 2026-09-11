@@ -76,6 +76,7 @@ issue is fixed; do not delete resolved entries.
 | 55 | 🟠 High | `VertiSea.ino` | LED heartbeat used `digitalRead()` on an OUTPUT pad, which can latch the LED on | ✅ Resolved 2026-09-11 |
 | 56 | 🟠 High | `current_filter_test.py` | Median-5 main stage cannot reproduce a scope's High-Resolution mode and shifted integrated charge by +2.79% | ✅ Resolved 2026-09-11 |
 | 57 | 🟠 High | `VertiSea.ino` | No watchdog: an I²C stall hangs the board permanently, losing a multi-day deployment | ⚠ Open |
+| 58 | 🔴 Critical | `VertiSea.ino` / `Madgwick/` | Vendored Madgwick sat outside the sketch folder, so Arduino could not see it and silently compiled a global copy with a different `betaDef` | ✅ Resolved 2026-09-11 |
 
 ---
 
@@ -2292,3 +2293,73 @@ pulses to free a stuck slave) before re-initialising after such a reset.
 compile-checked in the review environment, and shipping an unverified *reset* path into a
 deployment is worse than the problem it solves. It needs a compile against the installed
 core plus a bench soak confirming it does not fire spuriously.
+
+---
+
+### Issue 58 — 🔴 Critical: the vendored Madgwick library was never actually compiled
+
+**Status:** ✅ Resolved 2026-09-11.
+
+**Where:** `VertiSea/VertiSea.ino` line 152, and the former `Madgwick/` directory.
+
+The layout was:
+
+```
+TENG_SLT/                    <- repository root
+├── VertiSea/
+│   └── VertiSea.ino         <- #include "MadgwickAHRS.h"
+└── Madgwick/                <- sibling of the sketch folder
+    └── src/MadgwickAHRS.h
+```
+
+A quoted `#include` searches the including file's own directory first, then the compiler's
+`-I` paths. `VertiSea/` does not contain the header, and arduino-builder's `-I` paths cover
+the sketch folder, the core, the variant, and **libraries found in the sketchbook
+`libraries/` directory** — not sibling directories of the sketch. So `Madgwick/` was
+invisible to the build.
+
+Two consequences, and the second is the damaging one:
+
+1. On a machine with no Madgwick library installed, the sketch does not compile at all
+   (`MadgwickAHRS.h: No such file or directory`).
+2. On the machine where it *does* compile, a **Library Manager copy is being used instead**
+   — which is precisely what `README.md` and `AGENTS.md` told the developer not to install,
+   while also asserting the vendored copy "takes precedence over any global Arduino
+   install". That assertion was false, and stated confidently enough that nobody checked.
+
+The in-tree copy is a **local fork**, so this is not a harmless substitution:
+
+| Constant | Upstream 1.2.0 | In-tree | Effect if the global copy is compiled instead |
+|----------|---------------|---------|-----------------------------------------------|
+| `sampleFreqDef` | 512.0f | 104.0f | harmless — a seed value, overwritten from measured `dt` on the first tick |
+| `betaDef` | 0.1f | **0.5f** | **5× lower filter gain than every comment in the firmware assumes** |
+
+`setup()` carries a TODO reading "Current value: betaDef = 0.5f (Madgwick/src/
+MadgwickAHRS.cpp, line 30)" and proposes reducing it toward 0.05–0.1 for field use. If the
+global copy was compiled, beta was **already 0.1** and that TODO described a change that had
+effectively been made by accident.
+
+This also weakens the reasoning in **Issue 41**, which argued that beta = 0.5 probably masks
+the accel/gyro body-frame mismatch by letting the accelerometer dominate. At beta = 0.1 the
+gyro contributes considerably more, so the mismatch would show up in attitude more strongly
+than that analysis assumed. **Establish which library actually compiled before interpreting
+any existing attitude data.**
+
+**Resolution:** `MadgwickAHRS.h` and `MadgwickAHRS.cpp` moved into `VertiSea/`, beside the
+`.ino`. That placement is load-bearing in three ways:
+
+* the quoted `#include` can now only resolve to the copy beside it — precedence is a
+  property of the C preprocessor, not of documentation;
+* because the header is no longer missing, arduino-builder never searches libraries for it,
+  so a globally installed copy cannot be dragged in to produce duplicate symbols either;
+* Arduino compiles every `.cpp` in the sketch folder automatically.
+
+The `#include` line itself is unchanged. The upstream packaging metadata
+(`library.properties`, `keywords.txt`, `README.adoc`, `examples/`, `extras/`) moved to
+`archived/Madgwick-upstream/` as provenance — it is meaningless once the sources live in the
+sketch folder, and leaving a second copy of the sources anywhere is the duplication problem
+that retired the MATLAB parser.
+
+**Action required on the developer's machine:** delete any `Madgwick` / `MadgwickAHRS`
+library from the sketchbook `libraries/` folder. It is now genuinely unnecessary, and
+removing it is the only way to be certain which code is running.
