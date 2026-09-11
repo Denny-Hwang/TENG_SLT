@@ -61,8 +61,9 @@ The firmware writes this header inside `sdAppendRecord(type, t_ms, payload, payl
 | `0x12` | `TYPE_IMU_RAW` | ✓ | ✗ | ~97.5 Hz (`IMU_RAW_ONLY=1` only) |
 | `0x13` | `TYPE_BATTERY_CAL` | ✓ | ✗ | Once at boot |
 | `0x14` | `TYPE_BATTERY_VOLTAGE` | ✓ | ✓ | 1 Hz |
+| `0x15` | `TYPE_SYS_HEALTH` | ✓ | ✗ | 1 Hz |
 
-**Next free ID: `0x15`.**
+**Next free ID: `0x16`.**
 
 > **⚠ `0x0A` TYPE_CURRENT was removed on 2026-09-03** — the firmware no longer emits it
 > and the ground station no longer parses it over the radio. Its SD payload was a single
@@ -589,3 +590,42 @@ varying 1 Hz voltage against the high-rate current CSV.
   in the Python script handles occasional loss adequately.
 - **ASCII/CSV telemetry** — rejected due to bandwidth constraints at 115200 baud with
   104 Hz IMU data.
+
+---
+
+### `0x15` — TYPE_SYS_HEALTH (SD only, 1 Hz)
+
+Header (5 bytes) + 29-byte payload, `struct` format `<6I2HB`:
+
+| Offset | Size | Type | Field | Meaning |
+|--------|------|------|-------|---------|
+| 5 | 4 | `uint32` | `loop_max_us` | longest `loop()` pass in this 1 s interval |
+| 9 | 4 | `uint32` | `sd_write_max_us` | longest single SD sector write in this interval |
+| 13 | 4 | `uint32` | `sd_write_failures` | cumulative failed writes since boot |
+| 17 | 4 | `uint32` | `sd_recoveries` | cumulative successful remounts since boot |
+| 21 | 4 | `uint32` | `hall_rejected` | cumulative Hall edges rejected by the ISR as too fast |
+| 25 | 4 | `uint32` | `hall_lost` | cumulative Hall edges dropped, ISR ring buffer full |
+| 29 | 2 | `uint16` | `sd_queue_high_water` | peak bytes held in the RAM queue since boot |
+| 31 | 2 | `uint16` | `sd_overruns` | cumulative queue overruns since boot |
+| 33 | 1 | `uint8` | `flags` | bit 0 `sdError`, bit 1 magnetometer absent |
+
+`loop_max_us` and `sd_write_max_us` are **per-interval maxima**, reset after each record,
+so a single bad second cannot be hidden by averaging. Everything else is cumulative since
+boot, so the per-second rate is the difference between consecutive rows.
+
+**Why it exists.** A field report of "the heartbeat LED stops blinking or sticks on,
+seemingly when the harvester fires" was undiagnosable, because the firmware recorded
+nothing about its own execution. The LED toggles in the last block of `loop()`, so a frozen
+LED means a pass did not complete — and that has several very different causes which are
+indistinguishable from the outside:
+
+| Observation | Cause |
+|-------------|-------|
+| `sd_write_max_us` spikes with `loop_max_us` | card garbage collection stalling the write |
+| `sd_queue_high_water` approaching 4096 | the RAM queue backing up |
+| `sd_write_failures` / `sd_recoveries` climbing | card faults and remounts |
+| `hall_rejected` climbing fast | interrupt storm from harvester EMI on the Hall line |
+| `loop_max_us` spikes, everything else flat | an I²C stall — the one cause not otherwise visible |
+
+The parser turns these into plain-language warnings in the `Load BIN File` summary; the raw
+columns are exported as `<base>_sysHealth.csv`. Cost is 34 B/s against a ~6 kB/s log.

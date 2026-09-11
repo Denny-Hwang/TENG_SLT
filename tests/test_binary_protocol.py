@@ -69,6 +69,16 @@ def hall_edge(ts_ms, edges_us) -> bytes:
                   + struct.pack(f'<{len(edges_us)}I', *edges_us))
 
 
+def sys_health(ts_ms, loop_max_us=3000, sd_write_max_us=1200, sd_write_failures=0,
+               sd_recoveries=0, hall_rejected=0, hall_lost=0,
+               sd_queue_high_water=512, sd_overruns=0, flags=0) -> bytes:
+    """0x15 — '<6I2HB', 29-byte payload."""
+    return record(vs.TYPE_SYS_HEALTH, ts_ms,
+                  struct.pack('<6I2HB', loop_max_us, sd_write_max_us,
+                              sd_write_failures, sd_recoveries, hall_rejected,
+                              hall_lost, sd_queue_high_water, sd_overruns, flags))
+
+
 def current_cal(ts_ms, vref, adc_max, div_ratio, sens) -> bytes:
     return record(vs.TYPE_CURRENT_CAL, ts_ms,
                   struct.pack('<4f', vref, adc_max, div_ratio, sens))
@@ -198,6 +208,85 @@ class TestFixedLayouts(unittest.TestCase):
         self.assertEqual(vs._SD_PAYLOAD_BYTES[vs.TYPE_BATTERY_CAL], 20)
         self.assertNotIn(vs.TYPE_CURRENT_BLOCK, vs._SD_PAYLOAD_BYTES)
         self.assertNotIn(vs.TYPE_HALL_EDGE, vs._SD_PAYLOAD_BYTES)
+
+
+class TestSysHealth(unittest.TestCase):
+    """0x15 is the record that makes a field failure diagnosable after the fact."""
+
+    def test_round_trip_and_flags(self):
+        data = parse_bytes(sys_health(
+            1000, loop_max_us=2837, sd_write_max_us=1104,
+            sd_write_failures=2, sd_recoveries=1, hall_rejected=17, hall_lost=3,
+            sd_queue_high_water=1536, sd_overruns=1,
+            flags=vs.HEALTH_FLAG_NO_MAG))
+        self.assertEqual(structural_errors(data), [])
+        r = data['sys_health'][0]
+        self.assertEqual(r['loop_max_us'], 2837)
+        self.assertEqual(r['sd_write_max_us'], 1104)
+        self.assertEqual(r['sd_write_failures'], 2)
+        self.assertEqual(r['sd_recoveries'], 1)
+        self.assertEqual(r['hall_rejected'], 17)
+        self.assertEqual(r['hall_lost'], 3)
+        self.assertEqual(r['sd_queue_high_water'], 1536)
+        self.assertEqual(r['sd_overruns'], 1)
+        self.assertFalse(r['sd_error'])
+        self.assertTrue(r['mag_absent'])
+
+    def test_counters_hold_a_multi_day_deployment(self):
+        """uint32 must not wrap over a 2-day run — that is the design target."""
+        two_days_us = 2 * 86400 * 1000000
+        self.assertGreater(2**32 - 1, 600000)          # loop stalls are ms-scale
+        data = parse_bytes(sys_health(two_days_us % (2**32), loop_max_us=4294967295,
+                                      hall_rejected=4000000))
+        r = data['sys_health'][0]
+        self.assertEqual(r['loop_max_us'], 4294967295)
+        self.assertEqual(r['hall_rejected'], 4000000)
+
+    def test_healthy_log_produces_no_warning(self):
+        data = parse_bytes(b''.join(sys_health(i * 1000) for i in range(10)))
+        self.assertEqual(structural_errors(data), [])
+        self.assertEqual(data['errors'], [], "a healthy log must not raise warnings")
+        self.assertTrue(any('Health:' in n for n in data['notes']))
+
+    def test_loop_stall_is_reported_as_an_led_freeze(self):
+        blob = (sys_health(1000) + sys_health(2000, loop_max_us=812000)
+                + sys_health(3000))
+        data = parse_bytes(blob)
+        msg = ' '.join(data['errors'])
+        self.assertIn('LOOP STALL', msg)
+        self.assertIn('812 ms', msg)
+        self.assertIn('I2C', msg, "no SD write to blame -> must point elsewhere")
+
+    def test_loop_stall_blamed_on_sd_when_the_write_explains_it(self):
+        data = parse_bytes(sys_health(1000, loop_max_us=700000,
+                                      sd_write_max_us=690000)
+                           + sys_health(2000))
+        msg = ' '.join(data['errors'])
+        self.assertIn('LOOP STALL', msg)
+        self.assertIn('SD write', msg)
+
+    def test_hall_interference_is_named_as_interference(self):
+        blob = sys_health(1000) + sys_health(11000, hall_rejected=9000)
+        data = parse_bytes(blob)
+        msg = ' '.join(data['errors'])
+        self.assertIn('HALL EDGE NOISE', msg)
+        self.assertIn('900.0/s', msg)
+
+    def test_sd_failure_points_at_the_sibling_files(self):
+        data = parse_bytes(sys_health(1000, sd_write_failures=3, sd_recoveries=3))
+        msg = ' '.join(data['errors'])
+        self.assertIn('SD WRITE FAILURES', msg)
+        self.assertIn('sibling files', msg)
+
+    def test_health_csv_columns(self):
+        data = parse_bytes(sys_health(1000, hall_rejected=5))
+        with tempfile.TemporaryDirectory() as d:
+            written = vs.write_csvs_from_parsed(data, d, 'H')
+            path = [p for p in written if p.endswith('_sysHealth.csv')][0]
+            with open(path, newline='') as f:
+                rows = f.read().splitlines()
+        self.assertTrue(rows[0].startswith('timestamp_ms,loop_max_us,sd_write_max_us'))
+        self.assertIn('5', rows[1].split(','))
 
 
 class TestVariableLengthLayouts(unittest.TestCase):

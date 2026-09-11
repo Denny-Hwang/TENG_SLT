@@ -43,6 +43,7 @@ import argparse
 import csv
 import datetime
 import io
+import math
 import os
 import sys
 import time
@@ -58,6 +59,19 @@ DEFAULT_LOCAL_UTC_OFFSET_HOURS = -7.0
 # Reject integration intervals longer than this. Inter-block gaps in the SD log reach
 # ~45 ms; treating one as a real sample interval would invent charge that never flowed.
 MAX_DT_MS = 50.0
+
+# Default boxcar width for the High-Resolution stage. At the achieved ~800 Hz this is a
+# -3 dB bandwidth of ~22 Hz and +2.0 effective bits. The discharge envelope is ~12 s long
+# (~2 s rise, ~10 s decay), i.e. well under 1 Hz of real signal bandwidth, so 22 Hz leaves
+# roughly 20x margin over the fastest structure that physically exists at this node.
+# Raise it for a smoother trace; the reported bandwidth tells you what you are giving up.
+DEFAULT_BOXCAR = 17
+
+# Hampel despike defaults. 3 sigma against a local MAD estimate: the measured dropouts are
+# exact zeros between samples of 1500-3500 counts (10+ sigma) while the genuine 16.7% PMC
+# ripple stays well inside 3 sigma and is preserved for the boxcar to average.
+DESPIKE_WINDOW = 7
+DESPIKE_SIGMA = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -221,30 +235,213 @@ def median_filter(v, w):
     return out
 
 
-def mean_filter(v, w):
-    """Sliding mean - included ONLY for contrast, to show why it is the wrong choice."""
+def boxcar_filter(v, w):
+    """Sliding boxcar (moving average) of width w - the High-Resolution equivalent.
+
+    THIS IS THE MAIN DENOISER. It is what a Keysight scope's High-Resolution acquisition
+    mode does: average N consecutive samples taken at the full rate, trading bandwidth for
+    vertical resolution. Each 4x increase in w buys one extra effective bit
+    (bits = 0.5 * log2(w)), and for white noise the SD falls by exactly sqrt(w).
+
+    It replaced a median-5 as the main stage on 2026-09-11. The median was chosen to
+    reject the dropouts in the PMC data, which it does - but it is the wrong tool for this
+    job for three reasons:
+
+      1. It is ~20% less efficient than the mean at removing white noise (the sample
+         median of w Gaussian values has variance ~pi/2 larger than the mean), so it
+         delivers fewer effective bits for the same window. Measured on the real
+         9.14-count idle floor: median-5 gives 1.87x, boxcar-5 gives 2.26x (ideal 2.24x).
+      2. It is nonlinear, so it has no transfer function. You cannot state the resulting
+         bandwidth, cannot match it to a scope setting, and cannot predict what it does to
+         a waveform shape - which makes "similar to the scope in HiRes mode" unachievable
+         by construction.
+      3. Its noise reduction saturates. At w=33 the median reaches 4.71x where the boxcar
+         reaches 5.88x.
+
+    Despiking is still needed - a boxcar cannot reject the exact-zero dropouts - but that
+    is what hampel_filter() is for, applied first. Separating "remove outliers" from
+    "reduce noise" is what makes the second stage predictable.
+
+    Bandwidth: a boxcar of width w at sample rate fs has its first null at fs/w and its
+    -3 dB point at about 0.443 * fs/w. See boxcar_bandwidth_hz().
+    """
     if w <= 1:
         return [float(x) for x in v]
     if w % 2 == 0:
         w += 1
     half = w // 2
     n = len(v)
+    if n == 0:
+        return []
+    # Running sum rather than a fresh slice per sample: the naive form is O(n*w), which
+    # at w=65 over a multi-hour capture is minutes of pure Python. This is O(n).
     out = [0.0] * n
+    lo, hi = 0, min(n, half + 1)
+    total = float(sum(v[lo:hi]))
     for i in range(n):
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        seg = v[lo:hi]
-        out[i] = sum(seg) / float(len(seg))
+        new_lo, new_hi = max(0, i - half), min(n, i + half + 1)
+        while hi < new_hi:
+            total += v[hi]
+            hi += 1
+        while lo < new_lo:
+            total -= v[lo]
+            lo += 1
+        out[i] = total / float(hi - lo)
     return out
 
 
-def subtract_baseline(v, baseline):
-    """Remove the idle offset, clamping at zero.
+def boxcar_bandwidth_hz(w, fs_hz):
+    """-3 dB bandwidth and effective-bit gain of a width-w boxcar at fs_hz.
+
+    Returns (f_3db_hz, f_null_hz, bits_gained). Reported so the window can be chosen from
+    a bandwidth target instead of by eye, and so the result can be compared with a scope
+    whose HiRes setting is stated in bandwidth.
+    """
+    if w <= 1:
+        return (fs_hz / 2.0, float('inf'), 0.0)
+    return (0.442947 * fs_hz / w, fs_hz / float(w), 0.5 * math.log(w, 2))
+
+
+def hampel_filter(v, w=7, n_sigma=3.0, sigma_floor=0.0):
+    """Despike: replace only points that are outliers against their local neighbourhood.
+
+    A Hampel filter takes the local median and the local median absolute deviation (MAD),
+    scales the MAD by 1.4826 to make it a Gaussian-consistent sigma estimate, and replaces
+    a sample ONLY if it is more than n_sigma away. Everything else passes through
+    untouched.
+
+    That last property is the whole point, and it is what a blanket median filter does not
+    give: a median-5 rewrites every sample in the record, so it distorts the waveform
+    everywhere in order to fix the 0.7% of samples that are actually bad. This touches
+    only the bad ones and leaves the rest bit-exact for the boxcar stage to average.
+
+    The measured data justifies the default n_sigma=3: the PMC-output dropouts are exact
+    zeros sitting between samples of 1500-3500 counts, which is 10+ sigma, while the
+    genuine 16.7% ripple is well inside 3 sigma and survives.
+
+    `sigma_floor` handles the degenerate case where the local MAD is exactly zero, i.e.
+    more than half the window holds the identical value. That happens on a genuinely quiet
+    stretch - and notably when a connection drops and the ADC returns a run of exact zeros,
+    which the constant-DC characterisation showed is a real failure mode (51.9% exact zeros
+    in the first 5 s of that capture). With MAD = 0 there is no scale estimate, so a plain
+    Hampel test either divides by zero or, if guarded, silently passes every outlier
+    through. Neither is acceptable, so the caller supplies a floor - the instrument's own
+    noise floor, measured from the quietest part of the same record. A deviation cannot be
+    "explained by local variation" when it exceeds n_sigma times the noise the instrument
+    is known to have.
+
+    Returns (filtered, n_replaced).
+    """
+    if w <= 1 or len(v) < 3:
+        return [float(x) for x in v], 0
+    if w % 2 == 0:
+        w += 1
+    half = w // 2
+    n = len(v)
+    out = [float(x) for x in v]
+    replaced = 0
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        seg = sorted(v[lo:hi])
+        med = seg[len(seg) // 2]
+        devs = sorted(abs(x - med) for x in seg)
+        mad = devs[len(devs) // 2]
+        sigma = max(1.4826 * mad, sigma_floor)
+        if sigma > 0.0 and abs(v[i] - med) > n_sigma * sigma:
+            out[i] = float(med)
+            replaced += 1
+    return out, replaced
+
+
+def subtract_baseline(v, baseline, clamp=False):
+    """Remove the idle offset. Does NOT clamp at zero by default.
 
     Not cosmetic: the offset is integrated over the whole record, so its contribution
     grows with recording length and will dominate a long log with sparse events.
+
+    WHY CLAMPING WAS REMOVED (2026-09-11). This function used to return
+    `x - baseline if x > baseline else 0.0`, which half-wave rectifies the noise and so
+    does exactly what this module's own docstring says is unacceptable: it moves the mean
+    of a quantity that is about to be integrated into charge.
+
+    On an idle stretch the signal sits AT the baseline, so after subtraction it is
+    symmetric noise about zero. Clamping discards the negative half, and for
+    zero-mean Gaussian noise of width sigma the surviving mean is
+
+        E[max(X, 0)] = sigma / sqrt(2*pi) ~= 0.399 * sigma
+
+    With the measured idle floor (sigma = 9.14 counts) that is +3.65 counts of current
+    that does not exist, present for every idle second of the record. It is invisible on a
+    60-second bench capture - about 0.75 mC, under the noise - and ruinous on the 1-2 day
+    field deployment this system is for:
+
+        1 hour idle  ->    161 mC fabricated
+        1 day  idle  ->   3854 mC
+        2 days idle  ->   7708 mC     (the largest REAL event measured was 667.5 mC)
+
+    So on a two-day log the clamp alone invents about eleven discharge events' worth of
+    charge, and it scales with idle time - i.e. it is worst exactly when harvesting is
+    sparse, which is the case the measurement exists to quantify.
+
+    Plain subtraction leaves the idle stretches centred on zero, so they integrate to zero
+    (plus a random walk that grows as sqrt(t), not t). Negative excursions are physically
+    meaningful here: they are the other half of the noise, and discarding them is what
+    creates the bias.
+
+    `clamp=True` is retained only to reproduce pre-2026-09-11 numbers for comparison.
     """
-    return [x - baseline if x > baseline else 0.0 for x in v]
+    if clamp:
+        return [x - baseline if x > baseline else 0.0 for x in v]
+    return [x - baseline for x in v]
+
+
+def effective_rate_hz(ts):
+    """Achieved samples/second from the measured timestamps, ignoring block gaps."""
+    good = [ts[i] - ts[i - 1] for i in range(1, len(ts))
+            if 0.0 < ts[i] - ts[i - 1] <= MAX_DT_MS]
+    if not good:
+        return 0.0
+    return 1000.0 / (sum(good) / len(good))
+
+
+def hires_pipeline(ts, ct, adc_max, baseline, boxcar_w,
+                   despike_w=DESPIKE_WINDOW, n_sigma=DESPIKE_SIGMA, clamp=False,
+                   sigma_floor=None):
+    """The production filter: despike -> boxcar -> baseline. Returns (out, info).
+
+    The order is not interchangeable.
+
+      1. reject_full_scale  - samples pinned at the rail are not measurements at all.
+      2. hampel_filter      - remove the impulsive outliers (dropouts and spikes) that a
+                              linear filter cannot reject. Touches only outliers.
+      3. boxcar_filter      - the High-Resolution stage. Averaging is what buys effective
+                              bits, and it is only legitimate once the impulses are gone:
+                              a single exact zero beside 3500 counts drags a 5-point mean
+                              down by 700, which is the objection that originally led to
+                              using a median for everything.
+      4. subtract_baseline  - last, and without clamping, so the idle stretches integrate
+                              to zero instead of to a positive bias.
+
+    Doing 2 and 3 as separate stages is the change that makes this predictable: outlier
+    rejection is nonlinear and must be, averaging is linear and must be, and a median
+    filter doing both at once is the reason the result could not be matched to a scope
+    setting.
+    """
+    v1, n_fs = reject_full_scale(ct, adc_max)
+    # Scale floor for the despiker: the instrument's own noise, measured from the quietest
+    # second of this same record rather than assumed. Without it, a run of exact zeros
+    # from a dropped connection has MAD = 0 and every outlier in it passes through.
+    if sigma_floor is None:
+        sigma_floor = stats(quietest_window(ts, v1))["sd"]
+    v2, n_spike = hampel_filter(v1, despike_w, n_sigma, sigma_floor)
+    v3 = boxcar_filter(v2, boxcar_w)
+    v4 = subtract_baseline(v3, baseline, clamp=clamp)
+    fs = effective_rate_hz(ts)
+    f3db, fnull, bits = boxcar_bandwidth_hz(boxcar_w, fs)
+    return v4, {"n_full_scale": n_fs, "n_despiked": n_spike, "fs_hz": fs,
+                "sigma_floor": sigma_floor,
+                "f3db_hz": f3db, "f_null_hz": fnull, "bits_gained": bits,
+                "boxcar_w": boxcar_w, "despike_w": despike_w, "n_sigma": n_sigma}
 
 
 # ---------------------------------------------------------------------------
@@ -439,11 +636,15 @@ def _report_mean_preservation(lines, plateau):
     lines.append("")
     lines.append("  %-16s %10s %8s %9s %11s"
                  % ("filter", "mean", "sd", "sd ratio", "mean shift"))
-    for label, fn in (("median-3", lambda x: median_filter(x, 3)),
-                      ("median-5", lambda x: median_filter(x, 5)),
-                      ("median-9", lambda x: median_filter(x, 9)),
-                      ("median-15", lambda x: median_filter(x, 15)),
-                      ("mean-5", lambda x: mean_filter(x, 5))):
+    # Median and boxcar at matched widths, so the efficiency gap is visible rather than
+    # asserted. The boxcar column should approach the sqrt(w) ideal; the median falls
+    # about 20% short of it, which is the whole reason the main stage changed.
+    for label, fn in (("median-5", lambda x: median_filter(x, 5)),
+                      ("boxcar-5", lambda x: boxcar_filter(x, 5)),
+                      ("median-17", lambda x: median_filter(x, 17)),
+                      ("boxcar-17", lambda x: boxcar_filter(x, 17)),
+                      ("median-33", lambda x: median_filter(x, 33)),
+                      ("boxcar-33", lambda x: boxcar_filter(x, 33))):
         st = stats(fn(plateau))
         lines.append("  %-16s %10.2f %8.2f %9.2fx %+10.4f%%"
                      % (label, st["mean"], st["sd"],
@@ -576,28 +777,73 @@ def report(path, args):
     lines.append("  %-42s %12.3f %10.2f %+8.2f%%"
                  % ("1. reject >=full-scale (%d replaced)" % n_fs, q1, max(v1) * k, pct(q1)))
 
+    # Same scale floor the production pipeline uses, so this table's despike count
+    # matches the one reported below instead of being several times larger.
+    sigma_floor = stats(quietest_window(ts, v1))["sd"]
+    vd, n_spike = hampel_filter(v1, args.despike_window, args.despike_sigma, sigma_floor)
+    qd, _ = integrate_charge(ts, vd, k)
+    lines.append("  %-42s %12.3f %10.2f %+8.2f%%"
+                 % ("2. + hampel despike (%d replaced)" % n_spike, qd, max(vd) * k, pct(qd)))
+
+    fs = effective_rate_hz(ts)
     variants = []
-    for w in (3, 5, 7, 9, 15, 31):
+    for w in (5, 9, 17, 33, 65):
         t_start = time.perf_counter()
-        vv = median_filter(v1, w)
+        vv = boxcar_filter(vd, w)
         dur = time.perf_counter() - t_start
         qq, _ = integrate_charge(ts, vv, k)
         variants.append((w, qq, dur))
+        f3db, _, bits = boxcar_bandwidth_hz(w, fs)
         lines.append("  %-42s %12.3f %10.2f %+8.2f%%"
-                     % ("2. + median-%-2d" % w, qq, max(vv) * k, pct(qq)))
+                     % ("3. + boxcar-%-2d  (%5.1f Hz, +%.1f bit)" % (w, f3db, bits),
+                        qq, max(vv) * k, pct(qq)))
 
-    vm = mean_filter(v1, 5)
-    qm, _ = integrate_charge(ts, vm, k)
-    lines.append("  %-42s %12.3f %10.2f %+8.2f%%"
-                 % ("   (mean-5, contrast only - do not use)", qm, max(vm) * k, pct(qm)))
-
-    v2 = median_filter(v1, args.window)
-    v3 = subtract_baseline(v2, baseline)
+    v3, info = hires_pipeline(ts, ct, cal["adc_max"], baseline, args.window,
+                              args.despike_window, args.despike_sigma,
+                              clamp=args.clamp_baseline, sigma_floor=sigma_floor)
+    v2 = boxcar_filter(vd, args.window)
     q2, _ = integrate_charge(ts, v2, k)
     q3, _ = integrate_charge(ts, v3, k)
     lines.append("  %-42s %12.3f %10.2f %+8.2f%%"
-                 % ("3. + subtract baseline (%.2f counts)" % baseline,
+                 % ("4. + subtract baseline (%.2f counts)" % baseline,
                     q3, max(v3) * k, pct(q3)))
+
+    lines.append("")
+    lines.append(hr("HIGH-RESOLUTION EQUIVALENCE"))
+    lines.append("  This is the Keysight HiRes operation: average N consecutive samples")
+    lines.append("  acquired at the full rate, trading bandwidth for vertical resolution.")
+    lines.append("  effective sample rate : %.1f Hz (measured, not the 1000 Hz request)"
+                 % info["fs_hz"])
+    lines.append("  boxcar width          : %d samples" % info["boxcar_w"])
+    lines.append("  -3 dB bandwidth       : %.2f Hz   (first null %.2f Hz)"
+                 % (info["f3db_hz"], info["f_null_hz"]))
+    lines.append("  effective bits gained : +%.2f  (14.0 -> %.1f nominal)"
+                 % (info["bits_gained"], 14.0 + info["bits_gained"]))
+    lines.append("  despiked samples      : %d of %d (%.2f%%), scale floor %.2f counts"
+                 % (info["n_despiked"], n,
+                    100.0 * info["n_despiked"] / n if n else 0.0, info["sigma_floor"]))
+    lines.append("")
+    lines.append("  CHARGE IS UNCHANGED by the boxcar at every width in the table above -")
+    lines.append("  averaging is mean-preserving by construction, which is the property an")
+    lines.append("  integrated quantity requires. The median-5 this replaced moved the")
+    lines.append("  measured charge by +2.79% (docs/current_measurement_testing.md).")
+    lines.append("")
+    lines.append("  PEAK, by contrast, IS bandwidth-dependent and falls as the window")
+    lines.append("  widens - that is real, not an artefact: a peak read through a 21 Hz")
+    lines.append("  filter is a 21 Hz peak. A scope in HiRes reports the same reduction.")
+    lines.append("  Quote the bandwidth whenever quoting a peak, and note that the")
+    lines.append("  firmware's TYPE_CURRENT_STATS peak_mA is an UNFILTERED single sample,")
+    lines.append("  so it will always read higher than this column.")
+    lines.append("")
+    lines.append("  To match a scope capture, set the scope's HiRes bandwidth to the")
+    lines.append("  -3 dB figure above, or pick --window from the bandwidth you want:")
+    lines.append("      window = 0.443 * %.0f / f_3dB" % info["fs_hz"])
+    lines.append("  ALIASING CAVEAT: the ADC has no analog anti-alias filter, so anything")
+    lines.append("  above %.0f Hz folded into the band BEFORE sampling and no digital"
+                 % (info["fs_hz"] / 2.0))
+    lines.append("  filter can remove it. A scope in HiRes averages at its full rate and")
+    lines.append("  does not have this problem. If the two disagree, suspect this first;")
+    lines.append("  the fix is an RC low-pass at the sense point, not more filtering.")
     lines.append("")
     lines.append("  Baseline removal alone accounts for %.3f mC over %.1f s (%.1f%% of raw)."
                  % (q2 - q3, elapsed, 100.0 * (q2 - q3) / q_raw if q_raw else 0.0))
@@ -630,8 +876,9 @@ def report(path, args):
                 wr.writerow(["%.4f" % t, actual_time, a, "%.2f" % b,
                              "%.6f" % (b * k)])
         lines.append("")
-        lines.append("  wrote %s (raw + filtered, median-%d, baseline removed%s)"
-                     % (args.write_csv, args.window,
+        lines.append("  wrote %s (raw + filtered: despike + boxcar-%d = %.1f Hz, "
+                     "baseline removed%s)"
+                     % (args.write_csv, args.window, info["f3db_hz"],
                         ", RTC wall time added" if rtc_anchor else ""))
 
     if args.plot or args.save_plot:
@@ -846,8 +1093,7 @@ def process_current_file(path, window, utc_offset_hours, rtc_path, out_csv, out_
     tz = utc_offset_timezone(utc_offset_hours)
     k = counts_to_mA_factor(cal)
     baseline, _, _ = estimate_baseline(ts, ct)
-    full_scale_ok, _ = reject_full_scale(ct, cal["adc_max"])
-    filtered = subtract_baseline(median_filter(full_scale_ok, window), baseline)
+    filtered, _info = hires_pipeline(ts, ct, cal["adc_max"], baseline, window)
     wall_times = [wall_datetime_local(t, rtc_anchor, utc_offset_hours) for t in ts]
     raw_mA = [v * k for v in ct]
     filtered_mA = [v * k for v in filtered]
@@ -920,13 +1166,52 @@ def selftest():
     # A median rejects lone outliers; a mean does not. Use a mid-array index so the
     # window is the full width (edge indices use a shrinking window by design).
     check("median-3 removes a lone spike", median_filter([1, 1, 100, 1, 1], 3)[2], 1)
-    check("mean-5 does NOT remove it", round(mean_filter([1, 1, 100, 1, 1], 5)[2], 4),
-          20.8, 1e-4)
+    check("boxcar-5 does NOT remove it (why despiking runs first)",
+          round(boxcar_filter([1, 1, 100, 1, 1], 5)[2], 4), 20.8, 1e-4)
+    # MAD is exactly 0 on a constant window, so the scale floor is what lets the despiker
+    # act at all here. This is the dropped-connection case, not a contrived one.
+    hp, nhp = hampel_filter([1, 1, 100, 1, 1, 1, 1], 5, 3.0, sigma_floor=1.0)
+    check("hampel removes a spike on a constant run (MAD=0)", hp[2], 1.0)
+    check("hampel replaced exactly one sample", nhp, 1)
+    check("hampel without a floor cannot act on MAD=0",
+          hampel_filter([1, 1, 100, 1, 1, 1, 1], 5, 3.0)[1], 0)
+    check("hampel leaves clean data untouched",
+          hampel_filter([10, 11, 10, 11, 10, 11, 10], 5, 3.0, sigma_floor=1.0)[1], 0)
+    check("hampel keeps a real 16% ripple (the PMC signal)",
+          hampel_filter([3000, 3500, 3000, 3500, 3000, 3500, 3000], 5, 3.0,
+                        sigma_floor=9.14)[1], 0)
     check("median-3 removes a lone dropout", median_filter([10, 10, 0, 10, 10], 3)[2], 10)
 
     # Level preservation on constant input - the property that matters for charge.
     check("median-5 preserves a constant", stats(median_filter([4033] * 500, 5))["mean"],
           4033.0)
+    check("boxcar-17 preserves a constant",
+          round(stats(boxcar_filter([4033] * 500, 17))["mean"], 6), 4033.0)
+
+    # Boxcar bandwidth and bit gain - the numbers that let a window be chosen from a
+    # target bandwidth instead of by eye, and compared against a scope's HiRes setting.
+    f3, fn_, bits = boxcar_bandwidth_hz(16, 800.0)
+    check("boxcar-16 at 800 Hz: -3 dB", round(f3, 2), 22.15, 0.01)
+    check("boxcar-16 at 800 Hz: first null", round(fn_, 1), 50.0)
+    check("boxcar-16 gains 2 effective bits", round(bits, 4), 2.0)
+    check("boxcar noise falls as sqrt(w)",
+          round(boxcar_bandwidth_hz(4, 800.0)[2], 4), 1.0)
+
+    # THE BIAS THAT WAS REMOVED. Symmetric noise about the baseline must integrate to
+    # zero. Clamping at zero half-wave rectifies it, and the survivor mean is
+    # sigma/sqrt(2*pi) - a positive current that does not exist, present for every idle
+    # second of the record.
+    import random as _rnd
+    _rnd.seed(11)
+    _sigma = 9.14                      # measured idle floor, docs/current_measurement_testing.md
+    idle = [_rnd.gauss(18.36, _sigma) for _ in range(200000)]
+    mean_plain = stats(subtract_baseline(idle, 18.36))["mean"]
+    mean_clamp = stats(subtract_baseline(idle, 18.36, clamp=True))["mean"]
+    check("plain baseline subtraction leaves idle at zero", round(mean_plain, 2), 0.0, 0.05)
+    check("clamping biases idle high (the removed bug)", round(mean_clamp, 2),
+          round(_sigma / math.sqrt(2 * math.pi), 2), 0.05)
+    check("bias is >70x the honest residual",
+          mean_clamp > 70 * abs(mean_plain), True)
 
     out, nrep = reject_full_scale([100, 100, 16383, 100, 100], 16383)
     check("full-scale sample replaced", out[2], 100)
@@ -986,8 +1271,14 @@ def main():
         description="Test bench for harvested-current post-processing "
                     "(see docs/current_measurement_testing.md).")
     ap.add_argument("csv", nargs="?", help="path to a *_currentFast.csv")
-    ap.add_argument("--window", type=int, default=5,
-                    help="median window for the final pipeline (default 5)")
+    ap.add_argument("--window", type=int, default=DEFAULT_BOXCAR, metavar="N",
+                    help="boxcar (High-Resolution) width in samples, default %(default)s "
+                         "= ~22 Hz and +2.0 effective bits at the achieved ~800 Hz. "
+                         "N = 0.443 * fs / f_3dB for a bandwidth target.")
+    ap.add_argument("--despike-window", type=int, default=DESPIKE_WINDOW, metavar="N",
+                    help="Hampel despike window, default %(default)s")
+    ap.add_argument("--despike-sigma", type=float, default=DESPIKE_SIGMA, metavar="K",
+                    help="Hampel threshold in robust sigma, default %(default)s")
     ap.add_argument("--baseline-window", default=None, metavar="A,B",
                     help="seconds A,B of a known-idle span; default is auto-detect")
     ap.add_argument("--rtc-csv", default=None, metavar="RTC",
@@ -997,6 +1288,10 @@ def main():
                     help="local UTC offset attached to rtcEvt time (default %(default)s)")
     ap.add_argument("--write-csv", default=None, metavar="OUT",
                     help="write raw+filtered columns, including local wall time, to OUT")
+    ap.add_argument("--clamp-baseline", action="store_true",
+                    help="re-enable the pre-2026-09-11 clamp-at-zero baseline "
+                         "subtraction. For reproducing old numbers ONLY - it biases every "
+                         "idle second high by sigma/sqrt(2*pi) and that bias integrates.")
     ap.add_argument("--plot", action="store_true", help="show a raw-vs-filtered plot")
     ap.add_argument("--save-plot", default=None, metavar="PNG",
                     help="save the raw-vs-filtered plot to PNG instead of showing it")

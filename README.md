@@ -322,12 +322,32 @@ It deliberately does **not** import the ground station, so an unvalidated filter
 silently bias the production conversion path.
 
 ```
-py -3 current_filter_test.py --selftest                       # 18 checks, no data needed
+py -3 current_filter_test.py --selftest                       # built-in checks, no data needed
 py -3 current_filter_test.py <base>_currentFast.csv           # full report
+py -3 current_filter_test.py <csv> --window 33                # smoother: 10.7 Hz, +2.5 bits
 py -3 current_filter_test.py <csv> --plot                     # requires matplotlib
 py -3 current_filter_test.py <csv> --write-csv filtered.csv
 py -3 current_filter_test.py --gui                            # or run with no arguments
 ```
+
+The filter reproduces a **Keysight scope's High-Resolution acquisition mode**: despike with
+a Hampel filter, then boxcar-average, then remove the idle baseline. The boxcar is what
+buys effective bits — each 4× widening adds one bit and quarters the bandwidth. `--window`
+is that width; the report prints the resulting −3 dB bandwidth and bit gain so it can be
+matched to a scope setting (`N = 0.443 × fs / f_3dB`).
+
+Two properties worth knowing before comparing results:
+
+- **Charge is unchanged by the window.** Averaging is mean-preserving, which is what an
+  integrated quantity requires. The median-5 this replaced moved the measured charge by
+  +2.79%.
+- **Peak falls as the window widens, and that is correct** — a peak read through a 21 Hz
+  filter is a 21 Hz peak. Quote the bandwidth with the peak. The firmware's telemetry
+  `peak_mA` is an unfiltered single sample and will always read higher.
+
+The ADC has no analog anti-alias filter, so content above ~400 Hz folded in before
+sampling and no digital filter can remove it. If the buoy and the scope still disagree
+after matching bandwidths, suspect that first — the fix is an RC at the sense point.
 
 It reads calibration from the sibling `<base>_currentCal.csv` when present and wall-clock
 time from `<base>_rtcEvt.csv`; both are produced by the Step 2 parse above.
@@ -392,6 +412,7 @@ Raw SD log containing every packet type at its native rate. See
 | `_batteryCal` | `0x13` | once | vref (effective), adc_max, r_top_ohm, r_bottom_ohm, div_ratio |
 | `_batteryVoltage` | `0x14` | 1 Hz | counts, voltage_V |
 | `_rpm` | `0x0C` | telemetry rate | rpm (`RPM_ENABLE 1` only) |
+| `_sysHealth` | `0x15` | 1 Hz | loop and SD timing, failure and recovery counts, Hall-noise counters. **Read this first when a deployment misbehaves** |
 | ~~`_current`~~ | ~~`0x0A`~~ | — | **Retired 2026-09-03.** The point-sample estimator read ~2.1× high on this bursty signal. Still parsed so legacy logs load; never emitted. Use `_currentFast` |
 | ~~`_supcap`~~ | — | — | **No longer produced.** `0x0A` originally held supercapacitor voltage before the channel was repurposed to harvested current and then retired |
 
@@ -410,6 +431,8 @@ to SD and therefore never appear as CSVs.
 | Ground station shows nothing at all | Check `TELEM_ENABLE` — the committed build is `0` and transmits nothing. Also confirm `USB_DEBUG` and `USB_TELEM` are not both `1` |
 | Firmware upload fails | Verify the SparkFun Apollo3 boards package is installed and **RedBoard Artemis Nano** is selected |
 | Sketch will not open | The sketch must live in a folder of the same name: `VertiSea/VertiSea.ino` |
+| LED stopped blinking / stuck on mid-run | Open `<base>_sysHealth.csv`. `loop_max_us` over 500 000 is a stall long enough to freeze the LED, and the other columns say which subsystem caused it. The parser prints the diagnosis in the Load BIN File summary |
+| A deployment produced several `LOGnnnnn.BIN` files | Normal after an SD fault: each recovery opens a new file with a fresh copy of the calibration records. `sd_recoveries` in `_sysHealth.csv` counts them |
 | Board appears dead at boot | Count the LED pulses: 1 = RTC, 2 = BME280, 3 = stab IMU, 4 = fixed IMU, 5 = SD, 6 = filenames exhausted, 7 = file open. A steady 1 Hz blink means it is running normally; 4 Hz means a latched SD error. There is still no watchdog — a halted board stays halted (Issue 47) |
 | SD card not detected | CS pin is 4; the card must be FAT32 |
 | GPS time sync skipped | `GPS_SYNC_TIMEOUT_MS = 120 000 ms` when `GPS_ENABLE 1`; `GPS_ENABLE 0` skips it entirely |

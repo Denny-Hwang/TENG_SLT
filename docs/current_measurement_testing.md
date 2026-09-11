@@ -219,6 +219,13 @@ smaller mechanical input, or the accumulator not fully recharged between dischar
 
 ## Recommended post-processing pipeline
 
+> **⚠ REVISED 2026-09-11.** The pipeline below described a median-5 main stage and a
+> clamp-at-zero baseline subtraction. Both have been replaced. The *measurements* in this
+> document are unchanged and still stand — the reinterpretation is in
+> [Revision 2026-09-11](#revision-2026-09-11--matching-the-scopes-high-resolution-mode)
+> at the end. Read that section instead of the four steps below, which are kept for
+> provenance.
+
 Apply in this order. Measured effect on total charge for `09031702`:
 
 | Step | Operation | Charge | Δ |
@@ -458,3 +465,155 @@ sample it at 800 Hz simply because the existing channel is.
   mid-series makes runs hard to compare.
 - **Always capture idle periods at both ends** — they are the only in-file source of both the
   baseline and the noise floor.
+
+---
+
+## Revision 2026-09-11 — matching the scope's High-Resolution mode
+
+The stated requirement changed, and with it the answer. The goal is for the processed data
+to resemble a **Keysight scope in High-Resolution acquisition mode** rather than Normal
+mode. That is a specific, well-defined operation, and the pipeline above was not it.
+
+### What High-Resolution mode actually is
+
+HiRes averages **N consecutive samples acquired at the full sample rate** and emits one
+point. It is a boxcar (moving-average) FIR filter: linear, mean-preserving, with a known
+transfer function. It trades bandwidth for vertical resolution at a fixed exchange rate —
+each 4× increase in N buys one effective bit, because white noise falls as √N:
+
+```
+bits gained = 0.5 * log2(N)
+f_-3dB      = 0.443 * fs / N          first null at fs / N
+```
+
+Normal mode, by contrast, decimates by *dropping* samples: full bandwidth, full noise.
+The visual difference the operator sees between the two modes is entirely this averaging.
+
+### Why the median-5 could not produce that result
+
+Three reasons, in increasing order of importance.
+
+1. **It is less efficient.** The sample median of *w* Gaussian values has variance about
+   π/2 larger than the mean. Measured against this document's own 9.14-count idle floor:
+
+   | w | median SD ratio | boxcar SD ratio | ideal √w |
+   |---|-----------------|-----------------|----------|
+   | 5 | 1.87× | 2.25× | 2.24× |
+   | 17 | 3.40× | 4.15× | 4.12× |
+   | 33 | 4.71× | 5.81× | 5.74× |
+
+   The boxcar tracks the ideal to within 1%. The median gives up ~20% of the available
+   noise reduction — i.e. roughly a third of an effective bit at every width.
+
+2. **It is nonlinear, so it has no bandwidth.** There is no transfer function to quote, no
+   way to state what was kept and what was removed, and therefore no way to set a scope to
+   the same thing. "Similar to HiRes" is unachievable by construction with a median.
+
+3. **It moves the mean — which this document already measured and did not act on.** The
+   table above records median-5 changing total charge by **+2.79%**. This module's own
+   design note says a filter that moves the level is unusable for a quantity that gets
+   integrated. A boxcar changes it by **0.000%** at every width, because averaging is
+   mean-preserving by construction. That is not a tuning detail; it is the requirement.
+
+The median was chosen for a real and correct reason — the dropouts. Section
+[The noise is asymmetric](#the-noise-is-asymmetric-and-the-direction-is-counter-intuitive)
+shows 223 dropouts against 106 positive spikes, and a boxcar genuinely cannot reject them:
+one exact zero beside 3500 counts drags a 5-point mean down by 700. The error was using
+one filter for two jobs. **Despiking and noise reduction are separate stages** — the first
+must be nonlinear, the second must be linear, and combining them forfeits the properties of
+both.
+
+### The clamp-at-zero baseline subtraction was fabricating charge
+
+`subtract_baseline()` returned `x - baseline if x > baseline else 0.0`. On an idle
+stretch the signal sits *at* the baseline, so after subtraction it is symmetric noise about
+zero — and clamping discards the negative half. For zero-mean Gaussian noise of width σ the
+surviving mean is
+
+```
+E[max(X,0)] = σ / √(2π) ≈ 0.399 σ
+```
+
+With the σ = 9.14 counts measured here, that is **+3.65 counts of current that does not
+exist**, present for every idle second of the record and integrated straight into the
+reported charge:
+
+| Idle duration | Fabricated charge |
+|---------------|-------------------|
+| 1 hour | 161 mC |
+| 1 day | 3 854 mC |
+| **2 days** | **7 708 mC** |
+
+The largest *real* event measured in this document is **667.5 mC**. On the 1–2 day
+deployment this system is for, the clamp alone invents about eleven discharge events' worth
+of charge — and it scales with idle time, so it is worst exactly when harvesting is sparse,
+which is the case the measurement exists to quantify. On the 58.6 s bench capture it was
+worth only ~0.75 mC and hid under the noise, which is why it survived review.
+
+Plain subtraction leaves idle stretches centred on zero, so they integrate to zero plus a
+random walk growing as √t rather than t.
+
+### The pipeline now
+
+```
+1. reject_full_scale()   samples pinned at the rail are not measurements
+2. hampel_filter()       remove impulsive outliers ONLY; everything else passes untouched
+3. boxcar_filter()       the HiRes stage — this is what buys effective bits
+4. subtract_baseline()   last, and without clamping
+```
+
+Step 2 is a Hampel filter: local median ± n·MAD (scaled by 1.4826), replacing a sample only
+if it exceeds the threshold. Unlike a blanket median it rewrites *only* the bad samples —
+on the synthetic reproduction of this data it touches 0.73%, which matches the 0.72%
+outlier population measured here (223 + 106 of 45 700) closely enough to be reassuring.
+
+The MAD degenerates to zero when more than half a window holds the same value — which is
+exactly the dropped-connection signature this document identified in the first 5 s of the
+constant-DC run (51.9% exact zeros). The despiker therefore takes a **scale floor** derived
+from the quietest second of the same record, so it still has something to test against.
+
+### Choosing the window
+
+Default is `--window 17`: **20.8 Hz** and **+2.0 effective bits** at the achieved ~800 Hz,
+taking the idle floor from 9.14 counts (0.110 mA) to 2.20 counts (0.027 mA).
+
+The discharge envelope is ~12 s long (~2 s rise, ~10 s decay) — under 1 Hz of real signal
+bandwidth — so 20.8 Hz leaves roughly 20× margin over the fastest structure that physically
+exists at this node. Widen it freely if the trace is still busier than the scope's:
+
+| `--window` | −3 dB | Bits gained | Idle SD |
+|-----------|-------|-------------|---------|
+| 5 | 70.9 Hz | +1.16 | 4.05 counts |
+| 9 | 39.4 Hz | +1.58 | 3.02 |
+| **17** | **20.8 Hz** | **+2.04** | **2.20** |
+| 33 | 10.7 Hz | +2.52 | 1.57 |
+| 65 | 5.5 Hz | +3.01 | 1.12 |
+
+To match a specific scope capture, set both to the same bandwidth: `N = 0.443 × fs / f_3dB`.
+
+### Two things to expect, so they are not mistaken for faults
+
+**Peak falls as the window widens, and that is correct.** A peak read through a 21 Hz
+filter *is* a 21 Hz peak; the scope in HiRes reports the same reduction. Always quote the
+bandwidth alongside a peak. Note also that the firmware's `TYPE_CURRENT_STATS.peak_mA` is
+an **unfiltered single sample** and will always read higher than the processed column —
+they are different quantities, not a disagreement.
+
+**Charge does not change at all.** That is the point, not a bug.
+
+### The limit that post-processing cannot cross
+
+The ADC has **no analog anti-alias filter**. Everything above ~400 Hz folded into the band
+*before* the sample was taken, and no digital filter can undo that. A scope in HiRes
+averages at its full acquisition rate and never has this problem, so **if the two still
+disagree after matching bandwidths, aliasing is the first thing to suspect** — and the fix
+is an RC low-pass at the sense point, not more filtering.
+
+The [central finding](#the-central-finding-we-are-not-aliasing-the-switching-waveform)
+above argues we are not aliasing the 3.735 kHz switching, because the sensor sits after the
+PMC output filter and the autocorrelation stays at 0.96–0.98 out to 24 ms. That argument
+still holds, with one caveat now worth stating: the alias frequency moves with the achieved
+sample rate, which jitters with loop load, so aliased content would smear rather than
+appear at a fixed frequency. The decisive test is a direct one — capture the same discharge
+on the scope in HiRes and on the buoy simultaneously, match the bandwidths, and overlay.
+Until that is done, "we are not aliasing" is a well-supported inference, not a measurement.

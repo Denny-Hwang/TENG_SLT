@@ -70,6 +70,12 @@ issue is fixed; do not delete resolved entries.
 | 49 | 🟢 Low | `vertisea_plot_v7.py` | `_ts10_last` is only advanced by `0x06`, so the RPM series can mis-handle a ts10 wrap | ✅ Resolved 2026-09-11 |
 | 50 | 🟢 Low | `vertisea_plot_v7.py` | `connect_serial()` never closes a previously opened port | ✅ Resolved 2026-09-11 |
 | 51 | 🟢 Low | `vertisea_plot_v7.py` | `load_bin_file()` summary omits `imu_raw`, `rtc_event`, `fixed_cal`, `stab_cal` — the default build reports zero IMU records | ✅ Resolved 2026-09-11 |
+| 52 | 🔴 Critical | `current_filter_test.py` | Baseline subtraction clamped at zero, half-wave rectifying the noise and fabricating ~3854 mC of charge per idle day | ✅ Resolved 2026-09-11 |
+| 53 | 🔴 Critical | `VertiSea.ino` | `sdError` was a one-way latch — one transient write failure ended logging for the whole deployment | ✅ Resolved 2026-09-11 |
+| 54 | 🟠 High | `VertiSea.ino` | Hall ISR accepted every edge, so harvester EMI caused an interrupt storm → loop starvation → SD queue overrun | ✅ Resolved 2026-09-11 |
+| 55 | 🟠 High | `VertiSea.ino` | LED heartbeat used `digitalRead()` on an OUTPUT pad, which can latch the LED on | ✅ Resolved 2026-09-11 |
+| 56 | 🟠 High | `current_filter_test.py` | Median-5 main stage cannot reproduce a scope's High-Resolution mode and shifted integrated charge by +2.79% | ✅ Resolved 2026-09-11 |
+| 57 | 🟠 High | `VertiSea.ino` | No watchdog: an I²C stall hangs the board permanently, losing a multi-day deployment | ⚠ Open |
 
 ---
 
@@ -2109,3 +2115,180 @@ permanently.
 appears in the dialog automatically. The "No Buoy IMU Data" warning popup became a note in
 the summary that explains the `IMU_RAW_ONLY=1` case and points at the CSVs needed to
 recompute attitude offline (also addresses part of Issue 38).
+
+---
+
+### Issue 52 — 🔴 Critical: clamped baseline subtraction fabricates charge on idle records
+
+**Status:** ✅ Resolved 2026-09-11.
+
+**Where:** `current_filter_test.py`, `subtract_baseline()`.
+
+```python
+return [x - baseline if x > baseline else 0.0 for x in v]
+```
+
+On an idle stretch the signal sits *at* the baseline, so after subtraction it is symmetric
+noise about zero. Clamping discards the negative half. For zero-mean Gaussian noise of
+width σ the surviving mean is `E[max(X,0)] = σ/√(2π) ≈ 0.399σ` — with the measured idle
+floor (σ = 9.14 counts) that is **+3.65 counts of current that does not exist**, present for
+every idle second and integrated straight into reported charge.
+
+| Idle duration | Fabricated charge |
+|---------------|-------------------|
+| 1 hour | 161 mC |
+| 1 day | 3 854 mC |
+| 2 days | 7 708 mC |
+
+The largest *real* event in `docs/current_measurement_testing.md` is 667.5 mC. On the 1–2
+day deployment this system is for, the clamp alone invents about eleven events' worth of
+charge — and the error scales with idle time, so it is worst exactly when harvesting is
+sparse, which is the case the measurement exists to quantify.
+
+It survived review because on the 58.6 s bench capture it was worth ~0.75 mC, under the
+noise. It also directly contradicted the module's own stated design rule: "A filter that
+removes noise WITHOUT shifting the mean... a filter that moves the level is unusable for a
+quantity we integrate into charge."
+
+**Resolution:** clamping is off by default; `subtract_baseline(..., clamp=True)` and
+`--clamp-baseline` reproduce the old numbers for comparison. Idle stretches now integrate to
+zero plus a random walk growing as √t rather than t. A 200 000-sample Monte Carlo in the
+selftest pins the bias at σ/√(2π) so it cannot silently return.
+
+---
+
+### Issue 53 — 🔴 Critical: `sdError` was a one-way latch
+
+**Status:** ✅ Resolved 2026-09-11.
+
+**Where:** `VertiSea/VertiSea.ino`, `setSdError()` and every `if (!sdError)` guard.
+
+The first SD write failure of a deployment stopped logging permanently; only a power cycle
+cleared it. That is acceptable for a ten-minute bench run and unacceptable for the 1–2 day
+field logging this system exists for. A single transient — an EMI glitch on the SPI lines
+during a TENG discharge, a card pausing for internal garbage collection past the library's
+patience, a momentary brown-out — ended the entire run, and the only outward sign was the
+heartbeat LED changing from 1 Hz to 4 Hz.
+
+Issue 54 supplies a concrete mechanism that reached this latch by a route nobody intended:
+EMI on the Hall line → interrupt storm → 48 kB/s of `TYPE_HALL_EDGE` records into a pipeline
+sized for ~6 kB/s → queue overrun → `sdError` → logging dead for the deployment.
+
+**Resolution:** a recoverable state machine. On failure, back off `SD_RECOVERY_INTERVAL_MS`
+(5 s), then close the handle, re-run `SD.begin()`, and open a **new** file, re-emitting the
+RTC anchor and every calibration record via the new `sdWriteBootRecords()`. A new file is
+deliberate: after a card fault the old handle's cached cluster chain is untrustworthy, and
+data already written stays intact on disk. The RAM queue is discarded because its bytes are
+mid-stream fragments of the failed file. Capped at `SD_MAX_RECOVERY_ATTEMPTS` (20) so a
+genuinely dead card does not spend the run re-running `SD.begin()` in the sampling path.
+`sd_write_failures` and `sd_recoveries` are reported in the new `TYPE_SYS_HEALTH` record.
+
+---
+
+### Issue 54 — 🟠 High: Hall ISR accepted every edge, so EMI became an interrupt storm
+
+**Status:** ✅ Resolved 2026-09-11.
+
+**Where:** `VertiSea/VertiSea.ino`, `hallISR()`.
+
+`RPM_MIN_PERIOD_US` was applied in `loop()` — *after* the ISR had already taken the
+interrupt and buffered the timestamp. The TENG discharge is a high-voltage event beside an
+unshielded open-collector sense line, so a burst of induced edges cost three times over:
+
+1. Every edge takes an interrupt. A sustained burst starves `loop()`, which is directly
+   visible as the heartbeat LED freezing mid-state — the reported symptom.
+2. Every loop pass then emitted a `TYPE_HALL_EDGE` record of up to 31 timestamps (129 B).
+   At a ~370 Hz loop that is ~48 kB/s of pure noise into an SD pipeline sized for ~6 kB/s,
+   which overran the queue and tripped Issue 53.
+3. The RPM reading itself was destroyed, because `loop()` discards any interval spanning
+   more than one edge.
+
+**Resolution:** the same `RPM_MIN_PERIOD_US` threshold is applied inside the ISR, which
+costs one comparison and breaks all three paths. Nothing physically plausible is lost — the
+threshold is 3000 RPM against a rotor that reaches ~2000. Rejected edges are counted in
+`hallEdgeRejected` and reported in `TYPE_SYS_HEALTH`, so interference becomes visible
+instead of merely destructive; the parser flags a non-zero count as an interference warning.
+
+---
+
+### Issue 55 — 🟠 High: LED heartbeat read back an OUTPUT pad
+
+**Status:** ✅ Resolved 2026-09-11.
+
+**Where:** `VertiSea/VertiSea.ino`, the heartbeat block at the end of `loop()`.
+
+```cpp
+digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+```
+
+This assumes the pad reads back its driven level. On Apollo3 a pad configured for OUTPUT may
+have its input buffer disabled, in which case `digitalRead()` returns 0 regardless of what
+is being driven — and `!0` is always HIGH, so the LED latches on and stops blinking **while
+the firmware runs perfectly normally**.
+
+That is the "stays fully on, never blinks" half of the reported symptom. It cannot explain
+the "stops mid-blink" half, which is a genuine `loop()` stall (Issues 53, 54, 57 and the
+`TYPE_SYS_HEALTH` record added to measure it). Both variants were reported, which is
+consistent with two distinct causes.
+
+**Resolution:** state tracked in a `ledState` variable.
+
+---
+
+### Issue 56 — 🟠 High: median-5 cannot reproduce a scope's High-Resolution mode
+
+**Status:** ✅ Resolved 2026-09-11.
+
+**Where:** `current_filter_test.py`, `median_filter()` as the main denoising stage.
+
+The goal of the post-processing is for the result to resemble a Keysight scope in
+**High-Resolution** acquisition mode. HiRes averages N consecutive samples taken at the full
+rate: a boxcar FIR, linear, mean-preserving, with a stated transfer function, buying one
+effective bit per 4× increase in N. A median filter cannot produce that:
+
+1. **Less efficient.** The sample median of *w* Gaussian values has ~π/2 more variance than
+   the mean. Measured against this project's own 9.14-count idle floor: median-5 gives
+   1.87×, boxcar-5 gives 2.25× (ideal 2.24×); at w=33, 4.71× vs 5.81×. About a third of an
+   effective bit given away at every width.
+2. **Nonlinear, so it has no bandwidth.** No transfer function to quote, so no way to match
+   it to a scope setting. "Similar to HiRes" is unachievable by construction.
+3. **It moves the mean.** `docs/current_measurement_testing.md` recorded median-5 changing
+   total charge by +2.79% and did not act on it. A boxcar changes charge by 0.000%.
+
+The median was chosen for a sound reason — 223 measured dropouts, which a boxcar genuinely
+cannot reject. The error was using one filter for two jobs.
+
+**Resolution:** the stages are separated. `hampel_filter()` (local median ± n·MAD, with a
+scale floor derived from the quietest second of the record) removes *only* outliers, then
+`boxcar_filter()` does the HiRes averaging. `boxcar_bandwidth_hz()` reports the −3 dB point,
+first null and bit gain so a window can be chosen from a bandwidth target and matched to a
+scope. Default `--window 17` = 20.8 Hz, +2.0 bits at the achieved ~800 Hz.
+
+---
+
+### Issue 57 — 🟠 High: no watchdog, so an I²C stall is unrecoverable
+
+**Status:** ⚠ Open. Related to Issue 47 (which covers the boot-time halts).
+
+**Where:** `VertiSea/VertiSea.ino` — the Apollo3 watchdog is never initialised.
+
+Issues 53–55 removed the firmware-side causes of a frozen `loop()`, but one class remains
+and it is the one the firmware cannot fix from inside: an I²C transaction that never
+returns. `imu.checkStatus()`, `getAccel()`, `getGyro()`, `bme.read*()` and the RTC calls all
+block in `Wire` with no timeout, and a slave that latches SDA low after an EMI event — the
+TENG discharge is exactly such an event — hangs the bus and the firmware with it. Nothing
+recovers, and a multi-day deployment ends at the first occurrence.
+
+The new `TYPE_SYS_HEALTH` record makes this diagnosable after the fact: an I²C stall shows
+as `loop_max_us` spiking with every other counter flat, which is why the parser names it
+explicitly when nothing else accounts for a long pass.
+
+**Suggested resolution:** enable the Apollo3 WDT with a timeout of a few seconds and pet it
+at the end of `loop()`. A hang then becomes a reboot, and the firmware already opens a fresh
+log file on boot, so the cost is seconds rather than the run. Add I²C bus recovery (nine SCL
+pulses to free a stuck slave) before re-initialising after such a reset.
+
+**Why it is not in the 2026-09-11 change:** the AmbiqSuite WDT API could not be
+compile-checked in the review environment, and shipping an unverified *reset* path into a
+deployment is worse than the problem it solves. It needs a compile against the installed
+core plus a bench soak confirming it does not fire spuriously.

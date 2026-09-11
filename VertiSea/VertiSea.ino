@@ -61,6 +61,7 @@
 //    0x12  TYPE_IMU_RAW     — both IMUs, uncalibrated accel/gyro (SD only)
 //    0x13  TYPE_BATTERY_CAL — once at boot, battery-divider constants (SD only)
 //    0x14  TYPE_BATTERY_VOLTAGE — 1 Hz battery voltage (SD + telemetry)
+//    0x15  TYPE_SYS_HEALTH  — 1 Hz logging-health counters (SD only)
 //
 //  ENERGY HARVESTING & THE CURRENT CHANNEL
 //  ---------------------------------------
@@ -586,7 +587,8 @@ enum PacketType : uint8_t {
   TYPE_HALL_EDGE     = 0x11, // raw Hall edge timestamps (SD only, RPM_ENABLE=1)
   TYPE_IMU_RAW       = 0x12, // both IMUs, uncalibrated accel(int16 mg)+gyro(int32 mdps)
   TYPE_BATTERY_CAL   = 0x13, // battery ADC/divider constants — once at boot (SD only)
-  TYPE_BATTERY_VOLTAGE = 0x14 // 1 Hz battery voltage — SD + telemetry
+  TYPE_BATTERY_VOLTAGE = 0x14, // 1 Hz battery voltage — SD + telemetry
+  TYPE_SYS_HEALTH      = 0x15  // 1 Hz logging-health counters (SD only)
 };
 
 // =============================================================================
@@ -715,15 +717,55 @@ uint32_t sdServiceMaxUs = 0;
 #endif
 
 // =============================================================================
-//  SD ERROR STATE
+//  SD ERROR STATE AND RECOVERY
 // =============================================================================
-// Set to true on the first SD write failure detected in loop(). Once set it
-// is never cleared — the operator must power-cycle to reset.
+// sdError used to be a ONE-WAY LATCH: the first write failure of the deployment
+// stopped logging permanently and only a power cycle could clear it. That is
+// acceptable for a ten-minute bench run and unacceptable for the 1-2 day field
+// logging this system is for. A single transient — an EMI glitch on the SPI lines
+// during a TENG discharge, a card pausing for internal garbage collection past the
+// library's patience, a momentary brown-out — ended the entire run, and the only
+// outward sign was the heartbeat changing to 4 Hz.
+//
+// It is now a RECOVERABLE state machine:
+//
+//   healthy  --write fails-->  degraded  --remount succeeds-->  healthy (new file)
+//                                  |
+//                                  +--SD_MAX_RECOVERY_ATTEMPTS exhausted--> failed
+//
+// While degraded, records are dropped (there is nowhere to put them) but sampling,
+// telemetry and the health record continue, and a remount is retried on a backoff so
+// a transient does not cost more than a few seconds of data. Recovery deliberately
+// opens a NEW file rather than reusing the old handle: after a card-level fault the
+// previous handle's cached cluster chain cannot be trusted, and a fresh file keeps the
+// pre-fault data intact on disk.
+//
+// `sdError` remains the single flag the rest of the firmware tests, so every existing
+// `if (!sdError)` guard keeps its original meaning: "is it safe to append right now?"
+//
 // When sdError is true:
-//   • SD logging stops (writes are skipped to avoid hammering a failed card)
-//   • The LED heartbeat switches to a rapid 4 Hz error flash
+//   • SD appends are skipped (no point hammering a card that just refused)
+//   • The LED heartbeat switches to a rapid 4 Hz flash
 //   • Radio telemetry continues unaffected (sensor data is still valid)
+//   • A remount is attempted every SD_RECOVERY_INTERVAL_MS
 bool sdError = false;
+
+constexpr uint8_t  SD_MAX_RECOVERY_ATTEMPTS = 20;    // then stop trying and stay degraded
+constexpr uint32_t SD_RECOVERY_INTERVAL_MS  = 5000UL; // backoff between remount attempts
+
+uint32_t sdWriteFailures   = 0;   // cumulative failed writes since boot (health record)
+uint32_t sdRecoveries      = 0;   // successful remounts since boot (health record)
+uint8_t  sdRecoveryAttempts = 0;  // consecutive failed remounts; reset on success
+uint32_t lastSdRecoveryMs  = 0;   // millis() of the last remount attempt
+char     sdLogName[20]     = {0}; // current log filename, for the recovery path
+
+// RTC boot timestamp payload (TYPE_RTC_EVENT), captured in setup() and re-emitted into
+// any replacement file opened by the recovery path.
+uint8_t  rtcBootPayload[6] = {0};
+
+// LED heartbeat state. Tracked explicitly because digitalRead() on an OUTPUT pad is
+// not a reliable read-back on Apollo3 — see the heartbeat block at the end of loop().
+bool ledState = false;
 
 // Magnetometer presence. Set in setup(); false means mag.begin() failed. Nothing in the
 // 6-DOF configuration reads the device, so a failure is reported and tolerated rather
@@ -800,6 +842,8 @@ void setSdError(const char* message) {
   (void)message;  // DBG_PRINTLN compiles out in field builds
   if (!sdError) {
     sdError = true;
+    sdWriteFailures++;
+    lastSdRecoveryMs = millis();   // start the backoff; do not retry instantly
     DBG_PRINTLN(message);
   }
 }
@@ -953,6 +997,83 @@ bool sdFlushBuffered() {
 template <typename T>
 bool sdAppendRecord(uint8_t type, uint32_t t_ms, const T& payload) {
   return sdAppendRecord(type, t_ms, &payload, sizeof(payload));
+}
+
+// Attempt to bring SD logging back after a write failure.
+//
+// Called from loop() on a backoff while sdError is set. Returns true if logging
+// resumed. The sequence is deliberately heavy-handed — close the handle, re-run
+// SD.begin() to re-initialise the card, then open a NEW file — because a card that has
+// just refused a write may have an inconsistent internal state, and the library's
+// cached cluster chain for the old handle is no longer trustworthy.
+//
+// A new file per recovery is the point, not a side effect: data written before the
+// fault is already on disk and closed, so a later failure cannot corrupt it. The cost
+// is that a 2-day deployment with N recoveries produces N+1 files, which the parser
+// already handles (each is independently self-describing — the boot calibration records
+// are rewritten into every new file below).
+//
+// The in-RAM queue is discarded on recovery. Those bytes belong to the failed file's
+// byte stream and appending them to a new file would splice a partial record across the
+// boundary, which the parser cannot resynchronise from.
+
+// Forward declaration: defined below, after the calibration structs it serialises.
+// Needed here because sdTryRecover() re-emits the boot records into the new file.
+bool sdWriteBootRecords();
+
+bool sdTryRecover() {
+  if (sdRecoveryAttempts >= SD_MAX_RECOVERY_ATTEMPTS) return false;
+  sdRecoveryAttempts++;
+
+  DBG_PRINT("SD recovery attempt "); DBG_PRINTLN(sdRecoveryAttempts);
+
+  if (logFile) logFile.close();
+
+#if SD_BUFFERED_WRITE
+  // Discard queued bytes: they are mid-stream fragments of the file that just failed.
+  sdQueueHead = sdQueueTail = sdQueueUsed = sdProducerUsed = 0;
+#endif
+
+  if (!SD.begin(CS_SD)) {
+    DBG_PRINTLN("SD recovery: SD.begin() failed.");
+    return false;
+  }
+
+  // Derive a fresh name. The date-based name is already taken by the failed file, so go
+  // straight to the counter namespace and take the first free slot — the same
+  // no-overwrite rule setup() uses.
+  char fname[20] = {0};
+  bool found = false;
+  for (uint32_t n = 1; n <= 99999UL; n++) {
+    snprintf(fname, sizeof(fname), "LOG%05lu.BIN", n);
+    if (!SD.exists(fname)) { found = true; break; }
+  }
+  if (!found) {
+    DBG_PRINTLN("SD recovery: no unused filename remains.");
+    return false;
+  }
+
+  logFile = SD.open(fname, FILE_WRITE);
+  if (!logFile) {
+    DBG_PRINTLN("SD recovery: could not open replacement log file.");
+    return false;
+  }
+
+  snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
+  sdError = false;              // clear BEFORE writing: sdAppendRecord() checks it
+  sdRecoveryAttempts = 0;
+  sdRecoveries++;
+
+  // Re-emit the boot records so the new file is as self-describing as the first one.
+  // Without this, a recovered file would have no calibration and its counts could not
+  // be converted to mA or volts.
+  if (!sdWriteBootRecords()) {
+    DBG_PRINTLN("SD recovery: opened the file but could not write boot records.");
+    return false;             // sdError was re-set by the failing append
+  }
+
+  DBG_PRINT("SD recovery OK, now logging to "); DBG_PRINTLN(fname);
+  return true;
 }
 
 // TYPE_TELEM_IMU (0x06) — 5 Hz IMU attitude + vertical displacement
@@ -1121,6 +1242,49 @@ struct __attribute__((packed)) CurrentStatsPacket {
   uint32_t n_dropped;        // sample ticks missed vs the requested rate, THIS window
 };
 
+// TYPE_SYS_HEALTH (0x15) — 1 Hz logging-health counters, SD only.
+//
+// WHY THIS EXISTS. The reported field symptom was "the heartbeat LED stops blinking or
+// sticks on, seemingly when the harvester fires" — and there was no way to tell which of
+// several very different causes it was, because the firmware recorded nothing about its
+// own execution. A frozen LED means loop() did not reach its final block, which can be:
+//
+//   * a long SD write (card garbage collection)      -> sd_write_max_us spikes
+//   * the RAM queue backing up                       -> sd_queue_high_water near 4096
+//   * an SD failure and recovery                     -> sd_write_failures / sd_recoveries
+//   * an interrupt storm on the Hall line from EMI   -> hall_rejected climbs fast
+//   * an I2C stall (the one cause NOT visible here)  -> loop_max_us spikes with every
+//                                                       other counter flat
+//
+// Those five hypotheses are indistinguishable from the outside and are told apart
+// instantly by one row of this CSV. It costs 27 bytes/s against a ~6 kB/s log.
+//
+// All counters except loop_max_us and sd_write_max_us are cumulative since boot; those
+// two are per-interval maxima, reset after each record, so a single bad second cannot be
+// hidden by averaging.
+struct __attribute__((packed)) SysHealth {
+  uint32_t loop_max_us;          // longest loop() pass in this interval
+  uint32_t sd_write_max_us;      // longest single SD write in this interval
+  uint32_t sd_write_failures;    // cumulative failed writes since boot
+  uint32_t sd_recoveries;        // cumulative successful remounts since boot
+  uint32_t hall_rejected;        // cumulative ISR-rejected (too fast) Hall edges
+  uint32_t hall_lost;            // cumulative Hall edges dropped, ring buffer full
+  uint16_t sd_queue_high_water;  // peak bytes held in the RAM queue since boot
+  uint16_t sd_overruns;          // cumulative queue overruns since boot
+  uint8_t  flags;                // bit0 sdError, bit1 magnetometer absent
+};
+static_assert(sizeof(SysHealth) == 29, "SysHealth payload must remain 29 bytes");
+
+constexpr uint8_t HEALTH_FLAG_SD_ERROR   = 0x01;
+constexpr uint8_t HEALTH_FLAG_NO_MAG     = 0x02;
+
+// Per-interval maxima for the health record. loopMaxUs is sampled at the TOP of loop()
+// against the previous pass's entry time, so it measures the full round trip including
+// whatever blocked — which is exactly the quantity a frozen LED is reporting.
+uint32_t loopMaxUs      = 0;
+uint32_t lastLoopEntryUs = 0;
+unsigned long lastHealthMs = 0;
+
 // TYPE_STATUS (0x0B) — 1 Hz system health packet (radio only, not logged to SD)
 // flags byte bit definitions:
 //   bit 0 : sdError  — 0 = SD logging OK, 1 = SD write failure detected
@@ -1130,6 +1294,46 @@ struct __attribute__((packed)) StatusPacket {
   uint16_t timestamp_10ms;  // millis()/10
   uint8_t  flags;           // status bit-field (see above)
 };
+
+// Write the self-describing boot records: RTC anchor plus every calibration constant a
+// reader needs to turn raw counts into engineering units.
+//
+// Factored out of setup() so the SD recovery path can re-emit them into a replacement
+// file. A recovered file without these would contain counts that cannot be converted:
+// no mA (needs 0x0D), no volts (needs 0x13), no IMU units (needs 0x08/0x09), no LPF
+// inversion (needs 0x10), and no wall-clock anchor (needs 0x05).
+//
+// Returns false if any append failed, which means sdError was re-set underneath us.
+bool sdWriteBootRecords() {
+  uint32_t t = millis();
+
+  sdAppendRecord(TYPE_RTC_EVENT, t, rtcBootPayload, sizeof(rtcBootPayload));
+  sdAppendRecord(TYPE_FIXED_CAL, t, fixedCal);
+  sdAppendRecord(TYPE_STAB_CAL,  t, stabCal);
+
+  // vref is the per-channel EFFECTIVE reference (docs/adc_calibration.md), so the
+  // parser's counts * vref / adc_max already includes the ADC gain correction.
+  CurrentCal currentCal = {
+    VREF_A14, ADC_MAX, CURRENT_DIV_RATIO, CURRENT_SENS_MA_PER_V
+  };
+  sdAppendRecord(TYPE_CURRENT_CAL, t, currentCal);
+
+  BatteryCal batteryCal = {
+    VREF_A15, ADC_MAX, BATTERY_R_TOP_OHM, BATTERY_R_BOTTOM_OHM, BATTERY_DIV_RATIO
+  };
+  sdAppendRecord(TYPE_BATTERY_CAL, t, batteryCal);
+
+  LpfCal lpfCal = {
+    alpha_acc, alpha_gyro, alpha_mag,
+    ACCEL_CUTOFF_HZ, GYRO_CUTOFF_HZ, MAG_CUTOFF_HZ,
+    float(IMU_RATE_HZ),
+    { magCal.offset[0], magCal.offset[1], magCal.offset[2] },
+    { magCal.scale[0],  magCal.scale[1],  magCal.scale[2]  }
+  };
+  sdAppendRecord(TYPE_LPF_CAL, t, lpfCal);
+
+  return sdFlushBuffered();   // get them on disk before anything else happens
+}
 
 // =============================================================================
 //  computeVerticalAccel()
@@ -1333,9 +1537,40 @@ volatile uint32_t hallEdgeBuf[HALL_EDGE_BUF_LEN];
 volatile uint8_t  hallEdgeHead = 0;   // ISR writes here
 volatile uint8_t  hallEdgeTail = 0;   // loop() reads here
 volatile uint32_t hallEdgeLost = 0;   // edges dropped because the buffer was full
+volatile uint32_t hallEdgeRejected = 0;  // edges rejected by the ISR as too-fast (noise)
 
+// ---- ISR-level noise rejection ---------------------------------------------
+// The plausibility check used to live only in loop(): the ISR accepted EVERY edge,
+// buffered it, and loop() decided afterwards whether the derived period was sane.
+// That is fine for contact bounce, but it fails badly under electromagnetic
+// interference, which is what the TENG harvester produces at exactly the moment the
+// data matters. The discharge is a high-voltage event next to an unshielded
+// open-collector sense line, and a burst of induced edges then costs three times over:
+//
+//   1. Every edge takes an interrupt. A sustained burst starves loop(), which is
+//      directly visible as the heartbeat LED freezing mid-state.
+//   2. Every loop pass then emits a TYPE_HALL_EDGE record of up to 31 timestamps
+//      (129 B). At a ~370 Hz loop that is ~48 kB/s of pure noise into an SD pipeline
+//      sized for ~6 kB/s — the queue overruns and, before the recovery path added
+//      alongside this, latched sdError and ended logging for the whole deployment.
+//   3. The RPM reading itself is destroyed, because loop() discards every interval
+//      that spans more than one edge.
+//
+// Rejecting at the source costs one comparison and breaks all three. RPM_MIN_PERIOD_US
+// is the same threshold loop() already applied (20 000 us = 3000 RPM, 1.5x above the
+// ~2000 RPM the harvester actually reaches), so nothing physically plausible is lost.
+//
+// hallEdgeRejected is reported in the 1 Hz health record: a non-zero value is the
+// signature of electrical noise on the Hall line, which is otherwise invisible.
 void hallISR() {
   uint32_t now = micros();
+
+  // Wrap-safe: unsigned subtraction is correct across the ~71.6 min micros() rollover.
+  if (hallPulseCount != 0 && (now - hallPulseUs) < RPM_MIN_PERIOD_US) {
+    hallEdgeRejected++;
+    return;   // implausibly fast — interference or bounce, not a revolution
+  }
+
   hallPulseUs = now;
   hallPulseCount++;
 
@@ -1871,57 +2106,14 @@ void setup() {
     DBG_PRINTLN("Failed to open log file!");
     haltWithBlinkCode(7);
   }
+  snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
   DBG_PRINT("Logging to "); DBG_PRINTLN(fname);
-
-  // ---- Boot-time log records ----------------------------------------------
-  // Write a TYPE_RTC_EVENT packet so the parser can anchor absolute time.
-  // Uses local time (timezone-adjusted) so the timestamp in the binary log
-  // matches the wall-clock time visible to the operator, consistent with the
-  // SD filename. The RTC itself continues to hold UTC internally.
-  // yearOffset is years since 2000 (e.g. 25 for 2025), matching the RV8803
-  // getYear() convention used by the parser.
-  uint8_t yearOffset = (uint8_t)(localYear - 2000);
-  uint8_t rtcP[6] = {
-    yearOffset,
-    (uint8_t)localMonth,
-    (uint8_t)localDay,
-    (uint8_t)localHour,
-    localMin,
-    localSec
-  };
-  sdAppendRecord(TYPE_RTC_EVENT, millis(), rtcP, sizeof(rtcP));
-
-  // Write calibration constants so the parser can reconstruct physical units
-  // without needing a separate sidecar file.
-  sdAppendRecord(TYPE_FIXED_CAL, millis(), fixedCal);
-
-  sdAppendRecord(TYPE_STAB_CAL, millis(), stabCal);
-
-  // Write the current-sense scale constants so the raw ADC counts stored in the
-  // TYPE_CURRENT_BLOCK records can be converted to milliamps at parse time.
-  // vref is the per-channel EFFECTIVE reference (docs/adc_calibration.md), so
-  // the parser's counts * vref / adc_max already includes the gain correction.
-  CurrentCal currentCal = {
-    VREF_A14,
-    ADC_MAX,
-    CURRENT_DIV_RATIO,
-    CURRENT_SENS_MA_PER_V
-  };
-  sdAppendRecord(TYPE_CURRENT_CAL, millis(), currentCal);
-
-  BatteryCal batteryCal = {
-    VREF_A15,
-    ADC_MAX,
-    BATTERY_R_TOP_OHM,
-    BATTERY_R_BOTTOM_OHM,
-    BATTERY_DIV_RATIO
-  };
-  sdAppendRecord(TYPE_BATTERY_CAL, millis(), batteryCal);
-  sdFlushBuffered();  // ensure boot records are on disk before loop() starts
 
   // ---- IIR filter coefficients --------------------------------------------
   // alpha = dt / (rc + dt),  rc = 1 / (2π·f_cutoff)
-  // Computed here so they are available globally in loop() and collectIMUData_ISM().
+  // Computed here so they are available globally in loop() and collectIMUData_ISM(),
+  // and BEFORE the boot records are written — TYPE_LPF_CAL carries these values, and
+  // writing that record before they exist would silently log zeros.
   float dt = 1.0f / float(IMU_RATE_HZ);
   auto alpha = [&](float f) {
     float rc = 1.0f / (2.0f * PI * f);
@@ -1931,20 +2123,23 @@ void setup() {
   alpha_gyro = alpha(GYRO_CUTOFF_HZ);
   alpha_mag  = alpha(MAG_CUTOFF_HZ);
 
-  // Write the LPF/mag calibration record. Deliberately placed HERE rather than
-  // with the other boot cal records above, because the alpha values do not exist
-  // until this point. Writing it earlier would silently log zeros.
-  if (!sdError) {
-    LpfCal lpfCal = {
-      alpha_acc, alpha_gyro, alpha_mag,
-      ACCEL_CUTOFF_HZ, GYRO_CUTOFF_HZ, MAG_CUTOFF_HZ,
-      float(IMU_RATE_HZ),
-      { magCal.offset[0], magCal.offset[1], magCal.offset[2] },
-      { magCal.scale[0],  magCal.scale[1],  magCal.scale[2]  }
-    };
-    sdAppendRecord(TYPE_LPF_CAL, millis(), lpfCal);
-    sdFlushBuffered();
-  }
+  // ---- Boot-time log records ----------------------------------------------
+  // Capture the RTC boot timestamp into a global so sdWriteBootRecords() can re-emit it
+  // verbatim into a replacement file after an SD recovery. It anchors the whole log to
+  // wall-clock time, so a recovered file without it would be untethered.
+  //
+  // Uses local time (timezone-adjusted) so the timestamp in the binary log matches the
+  // wall-clock time visible to the operator, consistent with the SD filename. The RTC
+  // itself continues to hold UTC internally. yearOffset is years since 2000 (e.g. 26 for
+  // 2026), matching the RV8803 getYear() convention the parser expects.
+  rtcBootPayload[0] = (uint8_t)(localYear - 2000);
+  rtcBootPayload[1] = (uint8_t)localMonth;
+  rtcBootPayload[2] = (uint8_t)localDay;
+  rtcBootPayload[3] = (uint8_t)localHour;
+  rtcBootPayload[4] = localMin;
+  rtcBootPayload[5] = localSec;
+
+  sdWriteBootRecords();
 
   // ---- Hall-effect RPM sensor -----------------------------------------------
 #if RPM_ENABLE
@@ -1968,6 +2163,17 @@ void loop() {
 
   uint32_t      nowMs = millis();   // ms timestamp captured once per loop tick
   unsigned long nowUs = micros();   // µs timestamp for the 104 Hz IMU gate
+
+  // Longest loop() round trip since the last health record. Measured at the TOP of the
+  // pass against the previous entry, so it includes everything that blocked anywhere in
+  // the body — an I2C stall, an SD write, an interrupt storm. This is the number that
+  // explains a frozen heartbeat LED: the LED toggles in the last block, so any pass
+  // longer than the 500 ms heartbeat interval is directly visible as a stall.
+  if (lastLoopEntryUs != 0) {
+    uint32_t loopUs = (uint32_t)(nowUs - lastLoopEntryUs);
+    if (loopUs > loopMaxUs) loopMaxUs = loopUs;
+  }
+  lastLoopEntryUs = nowUs;
 
   // Persistent sensor readings — updated by their respective rate-limited blocks
   static float pressure = 0, humidity = 0, tempC = 0;  // BME280 (1 Hz)
@@ -2429,8 +2635,10 @@ void loop() {
     if (newPulses > 0) {
       if (lastHallUs != 0 && newPulses == 1) {
         uint32_t periodUs = pulseUs - lastHallUs;  // handles uint32 wrap correctly
-        // Reject implausibly short periods as noise / contact bounce.
-        // Threshold derived from RPM_MAX_EXPECTED (see RPM_MIN_PERIOD_US).
+        // Reject implausibly short periods as noise / contact bounce. The ISR now
+        // applies the same RPM_MIN_PERIOD_US threshold at the source, so this is a
+        // second line of defence rather than the only one — it still catches a short
+        // period formed across a buffer wrap. Both must use the same constant.
         if (periodUs >= RPM_MIN_PERIOD_US) {
           // 60e6 µs per minute, divided by pulses per revolution.
           currentRPM = 60.0e6f / (float(periodUs) * float(PULSES_PER_REV));
@@ -2528,6 +2736,60 @@ void loop() {
   }
 #endif
 
+  // ---- SD recovery attempt (backoff) --------------------------------------
+  // While degraded, retry a remount every SD_RECOVERY_INTERVAL_MS. A transient fault
+  // then costs a few seconds of data instead of the entire deployment, which is what
+  // the old permanent latch cost. Attempts are capped so a genuinely dead card does not
+  // spend the rest of the run re-running SD.begin() in the sampling path.
+  if (sdError && sdRecoveryAttempts < SD_MAX_RECOVERY_ATTEMPTS &&
+      nowMs - lastSdRecoveryMs >= SD_RECOVERY_INTERVAL_MS) {
+    lastSdRecoveryMs = nowMs;
+    sdTryRecover();
+  }
+
+  // ---- 1 Hz logging-health record (SD only) -------------------------------
+  // Written before the flush block so a stall recorded in this interval reaches the card
+  // in the same flush. Deliberately not gated on anything but sdError: this record is
+  // most valuable precisely when other things are going wrong.
+  if (nowMs - lastHealthMs >= 1000UL) {
+    lastHealthMs = nowMs;
+    if (!sdError) {
+      uint8_t healthFlags = 0;
+      if (sdError)    healthFlags |= HEALTH_FLAG_SD_ERROR;
+      if (!magPresent) healthFlags |= HEALTH_FLAG_NO_MAG;
+
+      SysHealth health = {
+        loopMaxUs,
+#if SD_BUFFERED_WRITE
+        sdServiceMaxUs,
+#else
+        0UL,
+#endif
+        sdWriteFailures,
+        sdRecoveries,
+#if RPM_ENABLE
+        hallEdgeRejected,
+        hallEdgeLost,
+#else
+        0UL, 0UL,
+#endif
+#if SD_BUFFERED_WRITE
+        sdQueueHighWater,
+        (uint16_t)min(sdQueueOverruns, uint32_t(65535)),
+#else
+        0, 0,
+#endif
+        healthFlags
+      };
+      sdAppendRecord(TYPE_SYS_HEALTH, nowMs, health);
+    }
+    // Per-interval maxima reset every second so one bad pass cannot be averaged away.
+    loopMaxUs = 0;
+#if SD_BUFFERED_WRITE
+    sdServiceMaxUs = 0;
+#endif
+  }
+
   // flush() forces buffered data to the SD card. Calling it every 5 s limits
   // data loss to at most 5 s of records if power is cut unexpectedly.
   // Skipped when sdError is set — no point flushing a failed card.
@@ -2566,14 +2828,23 @@ void loop() {
   }
 
   // ---- LED heartbeat -------------------------------------------------------
-  // Normal operation : slow 1 Hz toggle (500 ms on / 500 ms off).
-  // SD error detected: rapid 4 Hz flash (125 ms on / 125 ms off) so a field
+  // Normal operation  : slow 1 Hz toggle (500 ms on / 500 ms off).
+  // SD degraded/failed: rapid 4 Hz flash (125 ms on / 125 ms off) so a field
   // operator can see the fault without a USB connection.
+  //
+  // The state is tracked in a variable rather than read back with
+  // digitalRead(LED_PIN). On Apollo3 a pad configured for OUTPUT may have its
+  // input buffer disabled, in which case digitalRead() does NOT return the
+  // driven level — it returns 0. `!0` is always HIGH, so the LED would latch ON
+  // and stop blinking while the firmware ran perfectly normally. That is one of
+  // the two ways the reported "LED stops blinking / stays solid on" symptom can
+  // happen; the other is loop() stalling, which the health record now measures.
   {
     unsigned long heartbeatInterval = sdError ? 125UL : 500UL;
     if (nowMs - lastHeartbeat >= heartbeatInterval) {
       lastHeartbeat = nowMs;
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? HIGH : LOW);
     }
   }
 }

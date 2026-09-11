@@ -54,6 +54,7 @@ TYPE_HALL_EDGE = 0x11   # raw Hall edge timestamps (SD only, RPM_ENABLE=1)
 TYPE_IMU_RAW   = 0x12   # both IMUs: accel int16 mg + gyro int32 mdps (SD only, IMU_RAW_ONLY=1)
 TYPE_BATTERY_CAL = 0x13  # once   battery ADC/divider constants (SD only)
 TYPE_BATTERY_VOLTAGE = 0x14  # 1 Hz battery voltage (SD + telemetry)
+TYPE_SYS_HEALTH = 0x15  # 1 Hz logging-health counters (SD only)
 
 # Packet sizes for SD packets (bytes, including the 5-byte header: 1B type + 4B ts_ms)
 # TYPE_FIXED_IMU / TYPE_STAB_IMU : 5B header + 9×float + 1×uint16 = 43 B
@@ -116,6 +117,10 @@ TYPE_BATTERY_VOLTAGE = 0x14  # 1 Hz battery voltage (SD + telemetry)
 # STATUS flags (bit definitions — must match StatusPacket in VertiSea.ino)
 STATUS_FLAG_SD_ERROR = 0x01   # bit 0: SD write failure
 
+# TYPE_SYS_HEALTH flags byte (must match VertiSea.ino)
+HEALTH_FLAG_SD_ERROR = 0x01   # bit 0: SD logging degraded/failed right now
+HEALTH_FLAG_NO_MAG   = 0x02   # bit 1: magnetometer did not initialise at boot
+
 # ---------------------------------------------------------------------------
 # SD binary parser — payload byte counts AFTER the 5-byte header
 # ---------------------------------------------------------------------------
@@ -135,6 +140,7 @@ _SD_PAYLOAD_BYTES = {
     TYPE_IMU_RAW:     38,  # 3h3i3h3iH — accel mg int16, gyro mdps int32, interval
     TYPE_BATTERY_CAL: 20,  # 5 floats: ADC and divider constants
     TYPE_BATTERY_VOLTAGE: 2,  # uint16 raw ADC counts
+    TYPE_SYS_HEALTH: 29,  # 6 uint32 + 2 uint16 + 1 uint8
 }
 # NOTE: TYPE_CURRENT_BLOCK (0x0E) and TYPE_HALL_EDGE (0x11) are deliberately
 # absent — both are variable length, so they cannot be skipped from a fixed
@@ -193,7 +199,7 @@ def parse_binary_file(bin_path: str) -> dict:
         'rtc_event': [], 'mag': [], 'fixed_cal': [], 'stab_cal': [],
         'current': [], 'current_cal': [], 'current_fast': [],
         'lpf_cal': [], 'hall_edge': [], 'imu_raw': [],
-        'rpm': [], 'battery_cal': [], 'battery_voltage': [],
+        'rpm': [], 'battery_cal': [], 'battery_voltage': [], 'sys_health': [],
         'errors': [], 'notes': []
     }
 
@@ -477,6 +483,36 @@ def parse_binary_file(bin_path: str) -> dict:
                 data['battery_voltage'].append({
                     'ts_ms': ts_ms, 'counts': counts, 'voltage_V': None})
 
+            # ---- TYPE_SYS_HEALTH (0x15) — 29 payload bytes -------------------------
+            # Layout '<6I2HB'. Diagnostic record for the logging path itself, written
+            # once a second. Read this CSV FIRST when a deployment misbehaves: a frozen
+            # heartbeat LED means loop() did not finish a pass, and loop_max_us is the
+            # direct measurement of that. The other columns say which subsystem caused
+            # it — an SD stall, the RAM queue backing up, a remount, or an interrupt
+            # storm on the Hall line from harvester EMI.
+            #
+            # loop_max_us and sd_write_max_us are per-second maxima (reset each record);
+            # everything else is cumulative since boot, so differences between rows give
+            # the per-second rate.
+            elif pkt_type == TYPE_SYS_HEALTH:
+                raw = fid.read(29)
+                byte_offset += len(raw)
+                if len(raw) < 29:
+                    data['errors'].append(
+                        f"Truncated SYS_HEALTH packet at offset {byte_offset}")
+                    break
+                v = struct.unpack('<6I2HB', raw)
+                data['sys_health'].append({
+                    'ts_ms': ts_ms,
+                    'loop_max_us': v[0], 'sd_write_max_us': v[1],
+                    'sd_write_failures': v[2], 'sd_recoveries': v[3],
+                    'hall_rejected': v[4], 'hall_lost': v[5],
+                    'sd_queue_high_water': v[6], 'sd_overruns': v[7],
+                    'flags': v[8],
+                    'sd_error': bool(v[8] & HEALTH_FLAG_SD_ERROR),
+                    'mag_absent': bool(v[8] & HEALTH_FLAG_NO_MAG),
+                })
+
             # ---- TYPE_RPM (0x0C) — 2 payload bytes ---------------------------------
             # Payload: uint16 rpm  (0 when rotor is stopped or RPM_ENABLE=0)
             elif pkt_type == TYPE_RPM:
@@ -574,6 +610,68 @@ def parse_binary_file(bin_path: str) -> dict:
             f"Derived RPM from {len(edges)} Hall edges assuming 1 magnet "
             "(PULSES_PER_REV is not recorded in the log).")
 
+    # ---- Diagnose the logging path from the health records ----------------------
+    # The counters are useless if nobody reads them, and the person opening a CSV after a
+    # failed deployment is not going to know that 500 000 in loop_max_us means the I2C bus
+    # stalled. Turn the raw columns into the conclusion.
+    if data['sys_health']:
+        h = data['sys_health']
+        span_s = (h[-1]['ts_ms'] - h[0]['ts_ms']) / 1000.0 if len(h) > 1 else 0.0
+        worst_loop = max(r['loop_max_us'] for r in h)
+        worst_write = max(r['sd_write_max_us'] for r in h)
+        last = h[-1]
+
+        data['notes'].append(
+            f"Health: {len(h)} records over {span_s:.0f} s; worst loop pass "
+            f"{worst_loop / 1000.0:.1f} ms, worst SD write {worst_write / 1000.0:.1f} ms, "
+            f"queue high-water {max(r['sd_queue_high_water'] for r in h)} B.")
+
+        # A loop pass longer than the 500 ms heartbeat interval is, by construction, a
+        # visible LED freeze. This measures the reported symptom instead of guessing.
+        if worst_loop >= 500000:
+            culprit = ("a long SD write (see sd_write_max_us)" if worst_write >= 250000
+                       else "something OTHER than the SD write path - most likely an I2C "
+                            "stall, since no other counter accounts for it")
+            data['errors'].append(
+                f"LOOP STALL: longest loop() pass was {worst_loop / 1000.0:.0f} ms. The "
+                f"heartbeat LED toggles at the end of loop(), so any pass over 500 ms is a "
+                f"visible freeze. Attributed to {culprit}.")
+        elif worst_loop >= 100000:
+            data['errors'].append(
+                f"Longest loop() pass was {worst_loop / 1000.0:.0f} ms - not enough to "
+                "freeze the LED, but far above the ~3 ms nominal. Worth watching.")
+
+        if last['sd_write_failures']:
+            data['errors'].append(
+                f"SD WRITE FAILURES: {last['sd_write_failures']} since boot, "
+                f"{last['sd_recoveries']} successful remounts. Each recovery starts a new "
+                "LOGnnnnn.BIN, so look for sibling files - this log is not the whole run.")
+
+        if last['sd_overruns']:
+            data['errors'].append(
+                f"SD QUEUE OVERRUNS: {last['sd_overruns']}. The RAM queue filled faster "
+                "than the card drained it, so records were dropped.")
+
+        if last['hall_rejected']:
+            rate = last['hall_rejected'] / span_s if span_s > 0 else 0.0
+            data['errors'].append(
+                f"HALL EDGE NOISE: {last['hall_rejected']} edges rejected by the ISR as "
+                f"implausibly fast ({rate:.1f}/s average). A real rotor at 2000 RPM gives "
+                "~33 edges/s and none are rejected, so a non-zero count is electrical "
+                "interference on the Hall line - check shielding and routing away from "
+                "the harvester.")
+
+        if last['hall_lost']:
+            data['errors'].append(
+                f"HALL EDGES LOST: {last['hall_lost']} dropped because the ISR ring buffer "
+                "was full. Either the edge rate is far above the mechanical maximum "
+                "(interference) or loop() stalled for about a second.")
+
+        if last['mag_absent']:
+            data['notes'].append(
+                "Magnetometer did not initialise at boot. Harmless while the stabilized "
+                "IMU runs 6-DOF (nothing reads it), but no 0x07 records exist.")
+
     return data
 
 
@@ -606,6 +704,11 @@ _CSV_SCHEMAS = {
                      'r_bottom_ohm', 'div_ratio')),
     'battery_voltage': ('batteryVoltage', ('ts_ms', 'counts', 'voltage_V')),
     'rpm':       ('rpm',      ('ts_ms', 'rpm')),
+    'sys_health': ('sysHealth', ('ts_ms', 'loop_max_us', 'sd_write_max_us',
+                                 'sd_write_failures', 'sd_recoveries',
+                                 'hall_rejected', 'hall_lost',
+                                 'sd_queue_high_water', 'sd_overruns',
+                                 'sd_error', 'mag_absent')),
     'lpf_cal':   ('lpfCal',   ('ts_ms', 'alpha_acc', 'alpha_gyro', 'alpha_mag',
                                'accel_cutoff_hz', 'gyro_cutoff_hz',
                                'mag_cutoff_hz', 'imu_rate_hz',

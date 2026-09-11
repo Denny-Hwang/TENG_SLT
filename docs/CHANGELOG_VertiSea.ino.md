@@ -4,6 +4,85 @@ Newest first.
 
 ---
 
+## 2026-09-11 — Robust long-duration logging: SD recovery, ISR noise rejection, health record — `[UNCONFIRMED]`
+
+**Reported symptom:** on the bench the heartbeat LED blinks at 1 Hz to show SD logging is
+alive, but it frequently stops blinking or sticks fully on, apparently influenced by the
+measurement signal. Field deployments need 1–2 days of continuous logging.
+
+The LED toggles in the **last** block of `loop()`, so a frozen LED means a pass did not
+complete. Four independent defects could produce that, and nothing in the firmware recorded
+enough to tell them apart. All four are addressed; the instrumentation is the part that
+matters most, because it converts an unreproducible field symptom into a number.
+
+**1. `digitalRead()` on an OUTPUT pad (direct cause of "stuck on").**
+`digitalWrite(LED_PIN, !digitalRead(LED_PIN))` assumes the pad reads back its driven level.
+On Apollo3 a pad configured for OUTPUT may have its input buffer disabled, in which case
+`digitalRead()` returns 0 — and `!0` is always HIGH, so the LED latches on and stops
+blinking **while the firmware runs perfectly normally**. State is now held in `ledState`.
+This alone explains the "stays on, never blinks" variant; it cannot explain "stops
+mid-blink", which is the stall case below.
+
+**2. Hall ISR accepted every edge (the "affected by the measurement signal" path).**
+`RPM_MIN_PERIOD_US` was applied in `loop()`, after the ISR had already taken the interrupt
+and buffered the timestamp. The TENG discharge is a high-voltage event beside an unshielded
+open-collector sense line, so a burst of induced edges cost three times over:
+
+  * every edge takes an interrupt, starving `loop()` — visibly freezing the LED;
+  * every pass then emitted a `TYPE_HALL_EDGE` record of up to 31 timestamps (129 B), so a
+    ~370 Hz loop produced ~48 kB/s of noise into a pipeline sized for ~6 kB/s — the queue
+    overran and latched `sdError`, ending logging for the deployment;
+  * RPM itself was destroyed, because `loop()` discards any interval spanning >1 edge.
+
+The same threshold is now applied **inside** the ISR, which costs one comparison and breaks
+all three. `hallEdgeRejected` counts what it dropped, so the interference becomes visible
+instead of merely destructive.
+
+**3. `sdError` was a one-way latch.** The first write failure of the deployment stopped
+logging permanently; only a power cycle cleared it. Acceptable for a ten-minute bench run,
+not for 1–2 days — a single EMI glitch on SPI, a card pausing for garbage collection, or a
+brown-out ended the run, and the only outward sign was the heartbeat changing to 4 Hz.
+
+It is now a recoverable state machine: on failure, back off `SD_RECOVERY_INTERVAL_MS`, then
+close the handle, re-run `SD.begin()`, and open a **new** file. A new file is the point, not
+a side effect — after a card fault the old handle's cached cluster chain is untrustworthy,
+and data already written stays intact. The RAM queue is discarded on recovery because those
+bytes are mid-stream fragments of the failed file; splicing them into a new one would leave
+a partial record the parser cannot resynchronise from. Capped at
+`SD_MAX_RECOVERY_ATTEMPTS` so a genuinely dead card does not spend the run re-running
+`SD.begin()` in the sampling path.
+
+`sdWriteBootRecords()` was factored out of `setup()` for this: a recovered file re-emits the
+RTC anchor and every calibration record, so it is as self-describing as the first. Without
+that, a recovered file's counts could not be converted to mA (needs `0x0D`), volts (`0x13`),
+IMU units (`0x08`/`0x09`), or wall-clock time (`0x05`). `setup()` now computes the LPF
+alphas *before* writing boot records rather than after, since `TYPE_LPF_CAL` carries them.
+
+**4. `TYPE_SYS_HEALTH` (`0x15`), 1 Hz to SD.** The firmware measured nothing about its own
+execution, so the five candidate causes of a frozen LED were indistinguishable. One record
+per second now carries `loop_max_us`, `sd_write_max_us`, SD failure/recovery counts, queue
+high-water, overruns, and the Hall rejection/loss counters. `loop_max_us` is measured at the
+**top** of `loop()` against the previous entry, so it includes whatever blocked anywhere in
+the body — including an I²C stall, which is the one cause no other counter can reveal.
+Cost is 34 B/s against ~6 kB/s.
+
+**NOT done — no watchdog.** An I²C stall still hangs the board permanently. The Apollo3 WDT
+is the right answer and would turn a hang into a reboot-and-continue (the firmware already
+opens a fresh file on boot, so a reboot costs seconds, not the run). It is not included here
+because the AmbiqSuite WDT API could not be compile-checked in this environment, and
+shipping an unverified reset path into a deployment is worse than the problem. Recommended
+as the next change, with a bench soak to confirm it does not reset spuriously.
+
+**Verification:** syntax-checked with `g++ -fsyntax-only -std=c++14 -Wall -Wextra` against
+stub headers — no new diagnostics beyond the one pre-existing `%lu` stub artefact. The
+`0x15` layout is covered by 8 new round-trip tests. **Not compiled for Apollo3, not run on
+hardware.** Bench test before trusting: (a) confirm the LED blinks steadily for an hour;
+(b) pull the SD card mid-run and reinsert it, and confirm a new `LOGnnnnn.BIN` appears and
+`sd_recoveries` increments; (c) run the harvester and check `hall_rejected` and
+`loop_max_us` in `_sysHealth.csv`.
+
+---
+
 ## 2026-09-11 — Issues 45–47: per-window `n_dropped`, non-fatal magnetometer, diagnosable halts — `[UNCONFIRMED]`
 
 **Issue 45 — `n_dropped` was incomparable to `n_samples`.** The window-close block reset
