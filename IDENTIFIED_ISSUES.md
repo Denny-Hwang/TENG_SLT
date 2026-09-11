@@ -2394,6 +2394,7 @@ on the **first Hall edge after `attachInterrupt()`**, roughly one second into `l
 
 | Symptom | Mechanism |
 |---------|-----------|
+| **Log filenames lose their zero padding** — `9111614.BIN` instead of `09111614.BIN`, `LOG4.BIN` instead of `LOG00004.BIN`, `2026-9-11` instead of `2026-09-11` | core 2.x links a reduced `printf` that ignores width and zero-pad flags, so every `snprintf("%02d")` / `%05lu` in the filename and timestamp paths silently degrades. This breaks the documented `MMDDHHMM.BIN` 8.3 convention and any script that sorts or parses on it |
 | `.BIN` files contain exactly 196 bytes | the boot records were flushed in `setup()`; the panic arrives before the first 5 s `sdFlushBuffered()`, so the 118 B then sitting in the queue never reach the card |
 | No telemetry at all, on USB or radio | the board is dead ~1 s into `loop()` |
 | Heartbeat LED "blinking at about 1 Hz" | **not** the firmware heartbeat — it is the MbedOS error handler's own blink. This is why the LED looked healthy while nothing worked |
@@ -2432,3 +2433,21 @@ in order of preference:
 **Prevention:** `README.md` §4 stated core 1.2.1 but nothing enforced or checked it, and a
 2.x build compiles cleanly — the divergence only appears at run time. A compile-time guard
 on `ARDUINO_ARCH_MBED` would have turned a day of hardware debugging into a build error.
+That guard is now in place and was confirmed firing on 2026-09-11.
+
+**Confirmed fixed on core 1.2.1 (2026-09-11).** The same board, same wiring, same sketch:
+filenames regained their zero padding (`09111631.BIN`, `LOG00005.BIN`), the binary telemetry
+stopped leaking into the `USB_DEBUG` text — so `Serial`/`Serial1` are genuinely separate
+again — and logging ran with `overruns=0`, a queue high-water of 1005 B against the 4096 B
+capacity, and a loop dominated by the SD write rather than by anything unexplained:
+
+```
+SDq=533B high=1004 loopUs=23318 maxWriteUs=21520 overruns=0
+SDq=772B high=1005 loopUs=49774 maxWriteUs=47971 overruns=0
+```
+
+`loopUs ≈ maxWriteUs + 1.8 ms` in nearly every record, which says the longest pass is the
+SD write plus ~1.8 ms of actual work — the expected shape, and the direct cause of the
+Issue 34 rate shortfall. Note the write itself takes **11–48 ms per 512-byte sector**,
+against a more typical 1–5 ms: the card keeps up with the ~6 kB/s inflow but with little
+margin, and a faster card is the cheapest available improvement to the achieved IMU rate.
