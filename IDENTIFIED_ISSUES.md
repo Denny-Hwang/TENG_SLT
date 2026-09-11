@@ -2451,3 +2451,154 @@ SD write plus ~1.8 ms of actual work — the expected shape, and the direct caus
 Issue 34 rate shortfall. Note the write itself takes **11–48 ms per 512-byte sector**,
 against a more typical 1–5 ms: the card keeps up with the ~6 kB/s inflow but with little
 margin, and a faster card is the cheapest available improvement to the achieved IMU rate.
+
+---
+
+### Issue 60 — 🔴 Critical: sustained ADC saturation was silently rewritten as if it were glitch noise
+
+**Found:** 2026-09-11, on the field capture `09111632_currentFast.csv`.
+
+`reject_full_scale()` replaced **every** sample at or above `adc_max` with a 3-point median
+of its neighbours. That is the right treatment for one class of event and exactly the wrong
+treatment for the other, and the two look identical to a threshold test:
+
+* **An isolated rail sample** with neighbours far below cannot be real — current cannot rise
+  80% of range and return inside one ~1.2 ms sample interval. It is an impulsive glitch and
+  repairing it is correct.
+* **A run of consecutive rail samples** is the ADC honestly reporting that the input went
+  past its 2.0 V reference and it has no range left. The true value is unknown and is
+  ≥ full scale.
+
+Rewriting the second case invents data, and the invented value is not random — the samples
+bracketing a saturated run are themselves on the way up or down, so the replacement is
+systematically **low**. That biased value then went into `boxcar_filter()`, which is
+mean-preserving by construction and therefore faithfully propagated the bias across the
+whole window. The visible result on `09111632` was the filtered line sitting in the middle
+of the raw band instead of tracking it, and the reflex reading of that plot — "the filter
+isn't working, widen the window" — makes it worse, because a wider window spreads the
+fabricated deficit further.
+
+Worse than the number being wrong is that nothing said so. A clipped capture came out of
+the tool looking like a well-behaved measurement.
+
+**Fix.** `reject_full_scale()` now walks runs rather than samples. Runs up to
+`MAX_GLITCH_RUN` (2) are repaired from the samples bracketing the *whole* run — the old
+per-sample 3-point median could not repair even a run of 2, since its neighbour was another
+rail sample. Longer runs are left at full scale and counted, and the count is surfaced by a
+new `RANGE / SATURATION` report section printed *before* the filter tables, which states
+plainly that peak, charge and I²t are lower bounds and that this is a hardware range fault:
+add a divider ahead of A14 (and update `TYPE_CURRENT_CAL` so the scale follows), or remove
+the idle offset. No filter setting can recover a voltage the ADC never saw.
+
+Return type changed from `(filtered, n_replaced)` to `(filtered, n_replaced, sat)`.
+
+---
+
+### Issue 61 — 🟠 High: a ~26 mA idle offset eats 13% of the ADC range
+
+**Found:** 2026-09-11, same capture.
+
+`09111632` idles at **2159 counts ≈ 26.4 mA**, where the 2026-09-03 capture idled at
+approximately zero. Full scale is 200 mA, so peaks now clip at **174 mA of real current**,
+not 200 — the clipping in Issue 60 arrives 13% earlier than the nominal range suggests.
+
+Software subtraction restores the *numbers* but cannot restore the *range*: the headroom was
+already lost at the ADC, before any sample was stored. The second consequence is cosmetic
+but was misread as a bug — after subtraction the trace goes **negative** wherever the input
+dips below idle. On this capture it reaches −25 mA at the discharge edges. That is real
+signal, not a filter artefact, and clamping it away is precisely the charge-fabricating bug
+removed in Issue 52.
+
+The report now prints the offset as a percentage of range and warns above
+`OFFSET_WARN_FRAC` (5%). The offset itself still needs finding on the bench — it is either
+the sense amplifier's own output offset or a bias that appeared with the current wiring.
+Not fixable in post-processing.
+
+---
+
+### Issue 62 — 🟠 High: the HiRes stage averaged but never decimated, so a correct result looked like noise
+
+**Found:** 2026-09-11, from the user report "제대로 필터링도 안되고 있는 것 같아".
+
+The 2026-09-11 rewrite described High-Resolution mode correctly — *"average N consecutive
+samples taken at the full rate, **emit one point**"* — and then implemented only the first
+half. `boxcar_filter()` is a **sliding** boxcar: correct frequency response, but it returns
+one output sample per input sample. The decimation was never done.
+
+That is not a cosmetic difference when the result is plotted. A 40 s capture at 800 Hz is
+32,000 points drawn across roughly 1,300 pixels: **24 samples share every pixel column**, and
+matplotlib paints the full vertical extent of all 24. Whatever ripple survives the filter is
+rendered as a solid filled band, so:
+
+* a correctly filtered trace is indistinguishable from an unfiltered one;
+* widening the window appears to do nothing, because the band's *extent* shrinks far more
+  slowly than its *density* — and density is invisible at 24× overdraw;
+* the natural next step is to widen the window further, which throws away real bandwidth to
+  fix a drawing problem.
+
+A scope in HiRes emits one point per averaged block, so the ripple inside a block is
+genuinely absent from the output rather than hidden under overdraw. That is why the scope
+trace looks clean and this one did not, at the same bandwidth, on the same signal.
+
+**Fix.** New `decimate_blocks()` returns block centre time, block mean (the HiRes sample)
+and block min/max. The plot now draws the decimated mean as a line with the min/max as a
+translucent band behind it, so the averaged-away ripple stays visible instead of being
+quietly discarded — on a clean capture the band collapses onto the line; on a saturated or
+aliased one it stays wide, which is information. `--no-decimate` restores the per-sample
+line. Verified on a synthetic reproduction of `09111632` (26 mA offset, 3.05% saturation,
+137/311 Hz content): identical filter, identical bandwidth, the only change is decimation —
+970 points instead of 32,000.
+
+The CSV still carries one row per input sample; decimation is applied to the plot only, so
+`--write-csv` output and `integrate_charge()` are unchanged.
+
+Also added `window_for_bandwidth()` and `--bandwidth HZ`, so the window can be specified the
+way a scope states it rather than as a sample count that means nothing without also knowing
+the achieved rate.
+
+---
+
+### Issue 63 — 🟠 High: the telemetry GUI can reset the buoy, and says nothing about it
+
+**Found:** 2026-09-11 — "이거 실행했는데 … 갑자기 LED 깜박이지 않고 멈춰있어", with the GUI
+connected to COM7 and every field reading N/A.
+
+`connect_serial()` already knew the mechanism and documented it: on the RedBoard Artemis
+Nano the CH340E **RTS** line is wired to the Artemis reset pin (it is how the SVL bootloader
+is triggered), so opening the port can reboot the board. The same failure was recorded on
+2026-09-02, where connecting ~14 s after power-up produced a log containing two complete
+boot sequences with `ts_ms` resetting 10002 → 591.
+
+The existing mitigation — construct with `port=None`, clear `rts`/`dtr`, *then* open — stops
+**pyserial** from asserting the lines. It does not stop the Windows CH340 driver from setting
+the line state itself at open, and again at close. A reset pulse can still get through.
+
+What made this hard to read is that the symptom appears on the *other* device. The GUI
+reports "Connected" and shows N/A; the only visible sign is on the buoy, where the heartbeat
+LED stops. The firmware's LED semantics say which state it is in, and they are worth stating
+because they are diagnostic:
+
+| LED | Meaning (VertiSea.ino) |
+|-----|------------------------|
+| solid ON, indefinitely | inside `setup()` — driven HIGH on entry, LOW only at the end |
+| 1 Hz blink | normal `loop()` |
+| 4 Hz blink | `sdError` — SD degraded, recovery being attempted |
+| N short blinks, repeating | `haltWithBlinkCode(N)`: 1 RTC, 2 BME280, 3 stab IMU, 4 fixed IMU, 5 SD, 6 filenames exhausted, 7 file open |
+| frozen in whatever state it was in | `loop()` stalled — check `loop_max_us` in `_sysHealth.csv` |
+
+Compounding it: unless the firmware is built with `USB_TELEM 1` **and** `USB_DEBUG 0`, the
+buoy's USB port carries debug **text**, not telemetry packets — telemetry goes out `Serial1`
+to the radio. So connecting to the buoy's own port shows N/A no matter how long you wait,
+which is exactly what the screenshot showed. And while the GUI holds the port, the Arduino
+Serial Monitor cannot open it, so the operator loses their only diagnostic at the moment they
+need it.
+
+**Fix.** The GUI now identifies the port by USB vendor ID before opening it. `0x1A86` (WCH,
+the CH340E) is the buoy itself; `0x0403` (FTDI) is the RFD900x ground modem this GUI is for.
+Selecting a CH340 port raises a confirmation dialog stating both consequences — the reset
+risk and the text-not-packets problem — and pointing at "Load BIN File", which reads the SD
+log and needs no serial connection at all. It is a confirmation rather than a block: opening
+the buoy over USB is legitimate when the firmware is built for it.
+
+**Not fixed:** the reset itself is a hardware path (CH340E RTS → Artemis reset) and cannot be
+closed in software on the host side. During a logging run, do not open the buoy's USB port.

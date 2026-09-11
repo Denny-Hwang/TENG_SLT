@@ -4,6 +4,38 @@ Newest first.
 
 ---
 
+## 2026-09-11 (later) — Warn before opening the buoy's own USB port — `[UNCONFIRMED]`
+
+Reported symptom: the GUI was started, connected to COM7, showed N/A in every field — and
+the buoy's heartbeat LED stopped blinking.
+
+`connect_serial()` already documented the mechanism: on the RedBoard Artemis Nano the CH340E
+**RTS** line is wired to the Artemis reset pin, so opening that port can reboot the board.
+The existing mitigation (construct with `port=None`, clear `rts`/`dtr`, then open) stops
+*pyserial* from asserting the lines, but not the Windows CH340 driver from setting the line
+state itself at open and at close. The same failure was recorded on 2026-09-02, where
+connecting ~14 s after power-up produced a log with two complete boot sequences and `ts_ms`
+resetting 10002 → 591.
+
+The reason it was hard to read is that the symptom lands on the *other* device: the GUI says
+"Connected" and shows nothing, while the only visible sign is the LED on the buoy. A second
+issue makes the N/A fields inevitable regardless — unless the firmware is built with
+`USB_TELEM 1` **and** `USB_DEBUG 0`, the buoy's USB port carries debug *text*, not telemetry
+packets, because telemetry goes out `Serial1` to the radio. And while the GUI holds the port,
+the Arduino Serial Monitor cannot open it, so the operator loses their only diagnostic at the
+moment they need it.
+
+The GUI now identifies the port by USB vendor ID before opening: `0x1A86` (WCH CH340E) is the
+buoy, `0x0403` (FTDI) is the RFD900x modem this GUI is for. Selecting a CH340 port raises a
+confirmation naming both consequences and pointing at "Load BIN File", which reads the SD log
+with no serial connection at all. A confirmation rather than a block — connecting the buoy
+over USB is legitimate when the firmware is built for it.
+
+The reset path itself is hardware and cannot be closed from the host. See Issue 63, which
+also tabulates what each LED state means.
+
+---
+
 ## 2026-09-11 — Split the parser into `vertisea_protocol.py`; fix Issues 43, 44, 48–51 — `[UNCONFIRMED]`
 
 **Why the split.** The parser could not be imported without `tkinter`, `matplotlib` and

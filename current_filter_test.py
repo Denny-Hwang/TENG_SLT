@@ -73,6 +73,14 @@ DEFAULT_BOXCAR = 17
 DESPIKE_WINDOW = 7
 DESPIKE_SIGMA = 3.0
 
+# A rail hit lasting more than this many consecutive samples is genuine ADC saturation,
+# not an impulsive glitch, and must NOT be repaired. See reject_full_scale().
+MAX_GLITCH_RUN = 2
+
+# Warn when the idle offset eats more than this fraction of the ADC range. The offset is
+# pure dead headroom: every count of it is a count the peaks cannot use.
+OFFSET_WARN_FRAC = 0.05
+
 
 # ---------------------------------------------------------------------------
 # Loading
@@ -191,22 +199,70 @@ def counts_to_mA_factor(cal):
 # Filters
 # ---------------------------------------------------------------------------
 
-def reject_full_scale(v, adc_max):
-    """Replace samples at/above full scale with a 3-point median of neighbours.
+def reject_full_scale(v, adc_max, max_glitch_run=MAX_GLITCH_RUN):
+    """Repair isolated rail hits; KEEP sustained ones and report them as saturation.
 
-    Kept deliberately narrow. A sample pinned at full scale with neighbours far below
-    cannot be real - current cannot rise 80% of range and return inside one sample
-    interval - but a wider outlier rule would start deleting genuine fast structure.
-    Returns (filtered, n_replaced).
+    These are two different physical events and the previous version of this function
+    treated them as one, which is the single biggest reason a filtered trace could end up
+    sitting far below the raw envelope it is supposed to summarise.
+
+      * A SINGLE sample pinned at the rail with neighbours far below cannot be real -
+        current cannot rise 80% of range and return inside one ~1.2 ms sample interval.
+        That is an impulsive glitch, and replacing it with the bracketing samples is right.
+
+      * A RUN of consecutive samples at the rail is the opposite: it is the ADC honestly
+        reporting that the input went past its reference and it has no more range. The
+        true value is unknown and is >= full scale. Rewriting those samples invents data,
+        and because the samples bracketing a saturated run are themselves on the way up or
+        down, the invented value is systematically LOW. Feeding that into a
+        mean-preserving boxcar then drags the whole event downward - the filtered line
+        lands in the middle of the raw band instead of tracking it.
+
+    So runs up to max_glitch_run are repaired and longer runs are left alone and counted.
+    The caller must surface that count: a saturated capture is a RANGE fault, to be fixed
+    at the sensor or with a divider, and no amount of post-processing can recover a
+    voltage the ADC never saw. Reporting it as "filtered" would be a lie about the data.
+
+    Returns (filtered, n_replaced, sat) where sat = {n_saturated, longest_run, frac}.
     """
-    out = list(v)
-    n = 0
-    limit = int(adc_max)
-    for i in range(1, len(v) - 1):
-        if v[i] >= limit:
-            out[i] = sorted((v[i - 1], v[i], v[i + 1]))[1]
-            n += 1
-    return out, n
+    out = [float(x) for x in v]
+    n = len(v)
+    limit = float(adc_max)
+    n_replaced = 0
+    n_sat = 0
+    longest = 0
+    i = 0
+    while i < n:
+        if v[i] < limit:
+            i += 1
+            continue
+        j = i
+        while j < n and v[j] >= limit:
+            j += 1
+        run = j - i
+        if run <= max_glitch_run:
+            # Bracket the whole run, not each sample: a 3-point median inside a run of 2
+            # sees another rail sample as its neighbour and repairs nothing.
+            left = v[i - 1] if i > 0 else None
+            right = v[j] if j < n else None
+            if left is None and right is None:
+                repl = limit
+            elif left is None:
+                repl = float(right)
+            elif right is None:
+                repl = float(left)
+            else:
+                repl = (float(left) + float(right)) / 2.0
+            for idx in range(i, j):
+                out[idx] = repl
+                n_replaced += 1
+        else:
+            n_sat += run
+            longest = max(longest, run)
+        i = j
+    sat = {"n_saturated": n_sat, "longest_run": longest,
+           "frac": (float(n_sat) / n if n else 0.0)}
+    return out, n_replaced, sat
 
 
 def median_filter(v, w):
@@ -300,6 +356,63 @@ def boxcar_bandwidth_hz(w, fs_hz):
     if w <= 1:
         return (fs_hz / 2.0, float('inf'), 0.0)
     return (0.442947 * fs_hz / w, fs_hz / float(w), 0.5 * math.log(w, 2))
+
+
+def decimate_blocks(ts, v, w):
+    """Non-overlapping block average - what a scope ACTUALLY does in High-Resolution.
+
+    boxcar_filter() has the right frequency response but keeps the ORIGINAL sample rate,
+    so its output still carries one point per input sample. On a 60 s capture at 800 Hz
+    that is 48,000 points drawn across ~1,300 screen pixels: 37 samples share every pixel
+    column and matplotlib paints the full vertical extent of all 37. Any residual ripple
+    therefore renders as a solid filled band - which is why a correctly filtered trace can
+    still look like raw noise, and why widening the window appears not to help.
+
+    A Keysight scope in HiRes does not do that. It averages N samples and emits ONE point,
+    so the displayed record is decimated by N and the ripple inside a block is genuinely
+    absent from the output rather than hidden under overdraw. This reproduces that, and it
+    is the missing half of "make it look like the scope": the averaging was already right,
+    the decimation was not being done at all.
+
+    Returns (ts_out, mean, lo, hi) - block centre time, block mean (the HiRes sample), and
+    block min/max. The extremes are kept deliberately: a decimated line alone hides how
+    much signal is being averaged away, so the honest plot draws the mean as a line and
+    the min/max as a band behind it. On a clean capture the band collapses onto the line;
+    on a saturated or aliased one it stays wide, and that is information, not clutter.
+    """
+    if not ts:
+        return [], [], [], []
+    if w <= 1:
+        f = [float(x) for x in v]
+        return list(ts), f, list(f), list(f)
+    t_out, m_out, lo_out, hi_out = [], [], [], []
+    for i in range(0, len(v), w):
+        blk = v[i:i + w]
+        if not blk:
+            break
+        tb = ts[i:i + w]
+        t_out.append((tb[0] + tb[-1]) / 2.0)
+        m_out.append(sum(blk) / float(len(blk)))
+        lo_out.append(min(blk))
+        hi_out.append(max(blk))
+    return t_out, m_out, lo_out, hi_out
+
+
+def window_for_bandwidth(f3db_hz, fs_hz):
+    """Boxcar width whose -3 dB corner lands at f3db_hz, forced odd and at least 1.
+
+    The inverse of boxcar_bandwidth_hz(), so a bandwidth can be specified the way a scope
+    states it ("HiRes, 20 Hz") instead of as a sample count that means nothing without
+    also knowing the achieved rate.
+    """
+    if f3db_hz <= 0.0 or fs_hz <= 0.0:
+        return 1
+    w = int(round(0.442947 * fs_hz / f3db_hz))
+    if w < 1:
+        w = 1
+    if w % 2 == 0:
+        w += 1
+    return w
 
 
 def hampel_filter(v, w=7, n_sigma=3.0, sigma_floor=0.0):
@@ -411,7 +524,9 @@ def hires_pipeline(ts, ct, adc_max, baseline, boxcar_w,
 
     The order is not interchangeable.
 
-      1. reject_full_scale  - samples pinned at the rail are not measurements at all.
+      1. reject_full_scale  - repair isolated rail glitches; leave sustained saturation
+                              alone and report it, because inventing values there biases
+                              the boxcar that follows.
       2. hampel_filter      - remove the impulsive outliers (dropouts and spikes) that a
                               linear filter cannot reject. Touches only outliers.
       3. boxcar_filter      - the High-Resolution stage. Averaging is what buys effective
@@ -427,7 +542,7 @@ def hires_pipeline(ts, ct, adc_max, baseline, boxcar_w,
     filter doing both at once is the reason the result could not be matched to a scope
     setting.
     """
-    v1, n_fs = reject_full_scale(ct, adc_max)
+    v1, n_fs, sat = reject_full_scale(ct, adc_max)
     # Scale floor for the despiker: the instrument's own noise, measured from the quietest
     # second of this same record rather than assumed. Without it, a run of exact zeros
     # from a dropped connection has MAD = 0 and every outlier in it passes through.
@@ -438,7 +553,8 @@ def hires_pipeline(ts, ct, adc_max, baseline, boxcar_w,
     v4 = subtract_baseline(v3, baseline, clamp=clamp)
     fs = effective_rate_hz(ts)
     f3db, fnull, bits = boxcar_bandwidth_hz(boxcar_w, fs)
-    return v4, {"n_full_scale": n_fs, "n_despiked": n_spike, "fs_hz": fs,
+    return v4, {"n_full_scale": n_fs, "saturation": sat,
+                "n_despiked": n_spike, "fs_hz": fs,
                 "sigma_floor": sigma_floor,
                 "f3db_hz": f3db, "f_null_hz": fnull, "bits_gained": bits,
                 "boxcar_w": boxcar_w, "despike_w": despike_w, "n_sigma": n_sigma}
@@ -707,6 +823,63 @@ def _report_cost(lines, n, variants):
     lines.append("  Use this to decide whether the GUI option can default to ON (U21).")
 
 
+def _report_range(lines, ts, ct, cal, k, baseline):
+    """Is the measurement inside the ADC's range at all? Answer this before filtering.
+
+    Two faults show up here and neither is fixable downstream:
+
+      SATURATION - the input went past the reference, so the samples are a floor, not a
+      measurement. Averaging a clipped waveform returns a number that is confidently wrong
+      and looks perfectly well-behaved, which is worse than a visibly broken one.
+
+      OFFSET - a DC idle level is dead headroom. At 200 mA full scale a 26 mA offset means
+      peaks clip at 174 mA of real current, not 200, and the clipping arrives 13% earlier
+      than the datasheet range suggests. Subtracting it in software restores the numbers
+      but NOT the range that was already lost at the ADC.
+    """
+    adc_max = cal["adc_max"]
+    fs = effective_rate_hz(ts)
+    _, n_glitch, sat = reject_full_scale(ct, adc_max)
+    lines.append("")
+    lines.append(hr("RANGE / SATURATION"))
+    lines.append("  full scale        : %.0f counts = %.1f mA" % (adc_max, adc_max * k))
+    lines.append("  idle offset       : %.0f counts = %.2f mA = %.1f%% of range"
+                 % (baseline, baseline * k, 100.0 * baseline / adc_max if adc_max else 0.0))
+    lines.append("  usable headroom   : %.1f mA above the idle level"
+                 % ((adc_max - baseline) * k))
+    lines.append("  rail glitches     : %d isolated samples repaired (runs <= %d)"
+                 % (n_glitch, MAX_GLITCH_RUN))
+    sat_ms = (1000.0 * sat["n_saturated"] / fs) if fs else 0.0
+    lines.append("  SATURATED samples : %d (%.2f%% of record, %.0f ms total, "
+                 "longest run %d samples)"
+                 % (sat["n_saturated"], 100.0 * sat["frac"], sat_ms, sat["longest_run"]))
+
+    if sat["frac"] > 0.001:
+        lines.append("")
+        lines.append("  *** THE CAPTURE IS CLIPPED. %.2f%% of samples sat at the rail for"
+                     % (100.0 * sat["frac"]))
+        lines.append("  *** more than %d consecutive samples, so the true current there is"
+                     % MAX_GLITCH_RUN)
+        lines.append("  *** unknown and >= %.1f mA. Every number below - peak, charge, I2t -" % (adc_max * k))
+        lines.append("  *** is therefore a LOWER BOUND, not a measurement, and no filter")
+        lines.append("  *** setting changes that. Fix it at the hardware:")
+        lines.append("  ***   - add a divider ahead of A14, or drop CURRENT_SENS_MA_PER_V,")
+        lines.append("  ***     then update TYPE_CURRENT_CAL so the scale follows;")
+        lines.append("  ***   - or null the idle offset, which buys back %.1f mA of range."
+                     % (baseline * k))
+    if adc_max and baseline / adc_max > OFFSET_WARN_FRAC:
+        lines.append("")
+        lines.append("  WARNING: the idle offset consumes %.1f%% of the ADC range. That is"
+                     % (100.0 * baseline / adc_max))
+        lines.append("  headroom the peaks cannot use, and it is the difference between")
+        lines.append("  clipping at %.0f mA and clipping at %.0f mA. It also means the"
+                     % ((adc_max - baseline) * k, adc_max * k))
+        lines.append("  post-subtraction trace goes NEGATIVE wherever the input dips below")
+        lines.append("  idle - that is real signal, not a filter artefact, and clamping it")
+        lines.append("  away would bias the charge (see subtract_baseline).")
+    return sat
+
+
 def report(path, args):
     lines = []
     ts, ct = load_current_csv(path)
@@ -717,6 +890,12 @@ def report(path, args):
     k = counts_to_mA_factor(cal)
     n = len(ct)
     elapsed = _report_input(lines, path, ts, ct, cal, cal_src, k)
+
+    # --bandwidth is resolved here, against the ACHIEVED rate read from the timestamps,
+    # not the nominal request. A width quoted without its sample rate is meaningless, so
+    # let the user state the corner frequency and derive the width from the data.
+    if getattr(args, "bandwidth", None):
+        args.window = window_for_bandwidth(args.bandwidth, effective_rate_hz(ts))
 
     lines.append("")
     lines.append(hr("WALL-CLOCK TIME"))
@@ -758,6 +937,12 @@ def report(path, args):
     if not args.baseline_window and bwarn:
         lines.append("  WARNING: %s" % bwarn)
 
+    # ---- range health ---------------------------------------------------
+    # Printed BEFORE the filter tables on purpose. If the front end clipped or the offset
+    # ate the range, nothing below this point can be fixed by choosing a better window,
+    # and reading the filter numbers first sends you chasing the wrong thing.
+    _report_range(lines, ts, ct, cal, k, baseline)
+
     _report_mean_preservation(lines, steadiest_high_plateau(ts, ct))
 
     # ---- pipeline ladder ------------------------------------------------
@@ -772,10 +957,10 @@ def report(path, args):
     def pct(q):
         return 100.0 * (q - q_raw) / q_raw if q_raw else 0.0
 
-    v1, n_fs = reject_full_scale(ct, cal["adc_max"])
+    v1, n_fs, sat = reject_full_scale(ct, cal["adc_max"])
     q1, _ = integrate_charge(ts, v1, k)
     lines.append("  %-42s %12.3f %10.2f %+8.2f%%"
-                 % ("1. reject >=full-scale (%d replaced)" % n_fs, q1, max(v1) * k, pct(q1)))
+                 % ("1. repair rail glitches (%d replaced)" % n_fs, q1, max(v1) * k, pct(q1)))
 
     # Same scale floor the production pipeline uses, so this table's despike count
     # matches the one reported below instead of being several times larger.
@@ -815,6 +1000,9 @@ def report(path, args):
     lines.append("  effective sample rate : %.1f Hz (measured, not the 1000 Hz request)"
                  % info["fs_hz"])
     lines.append("  boxcar width          : %d samples" % info["boxcar_w"])
+    lines.append("  output rate if decimated: %.1f Hz (%d points, was %d)"
+                 % (info["fs_hz"] / max(info["boxcar_w"], 1),
+                    (n + info["boxcar_w"] - 1) // max(info["boxcar_w"], 1), n))
     lines.append("  -3 dB bandwidth       : %.2f Hz   (first null %.2f Hz)"
                  % (info["f3db_hz"], info["f_null_hz"]))
     lines.append("  effective bits gained : +%.2f  (14.0 -> %.1f nominal)"
@@ -834,6 +1022,16 @@ def report(path, args):
     lines.append("  Quote the bandwidth whenever quoting a peak, and note that the")
     lines.append("  firmware's TYPE_CURRENT_STATS peak_mA is an UNFILTERED single sample,")
     lines.append("  so it will always read higher than this column.")
+    lines.append("")
+    lines.append("  DECIMATION is the other half of HiRes and is easy to forget: the scope")
+    lines.append("  emits ONE point per averaged block, this tool's CSV keeps one point per")
+    lines.append("  input sample. Same frequency response, %dx more points - and %d points"
+                 % (info["boxcar_w"], n))
+    lines.append("  on a 1300-pixel axis puts %d samples in every pixel column, so residual"
+                 % max(1, n // 1300))
+    lines.append("  ripple paints a solid band and a correctly filtered trace still looks")
+    lines.append("  like noise. The plot decimates for exactly this reason; pass")
+    lines.append("  --no-decimate to see the per-sample line instead.")
     lines.append("")
     lines.append("  To match a scope capture, set the scope's HiRes bandwidth to the")
     lines.append("  -3 dB figure above, or pick --window from the bandwidth you want:")
@@ -883,13 +1081,93 @@ def report(path, args):
 
     if args.plot or args.save_plot:
         lines.append("")
-        lines.append(_do_plot(ts, ct, v3, k, path, save_to=args.save_plot))
+        lines.append(_do_plot(ts, ct, v3, k, path, save_to=args.save_plot,
+                              block_w=args.window, info=info, cal=cal,
+                              decimate=not getattr(args, "no_decimate", False)))
 
     return "\n".join(lines)
 
 
-def _do_plot(ts, raw, final, k, path, save_to=None):
-    """Single overlay: raw in blue, filtered in red drawn last so it sits on top."""
+def plot_series(ts, raw, final, k, block_w=1, decimate=True):
+    """Everything a raw-vs-filtered plot needs, in mA, with the filtered side decimated.
+
+    Split out of the drawing code because three callers need the same numbers - the CLI
+    plot, the GUI's saved PNG and the GUI's on-screen canvas - and they previously each
+    rebuilt them slightly differently.
+
+    Returns (raw_mA, idx, fil_mA, lo_mA, hi_mA) where idx indexes into ts for the filtered
+    series: the full range when not decimating, one entry per block when decimating. lo/hi
+    are None when not decimating, because without blocks there is no spread to show.
+    """
+    raw_mA = [c * k for c in raw]
+    w = block_w if (decimate and block_w and block_w > 1) else 1
+    if w <= 1:
+        return raw_mA, list(range(len(ts))), [c * k for c in final], None, None
+    tb, mb, lob, hib = decimate_blocks(ts, final, w)
+    # Block centre times are recomputed as indices so the caller can map them onto either
+    # an elapsed-seconds axis or a wall-clock axis without this function knowing which.
+    idx = list(range(0, len(ts), w))
+    idx = [min(i + w // 2, len(ts) - 1) for i in idx][:len(mb)]
+    return (raw_mA, idx, [c * k for c in mb], [c * k for c in lob], [c * k for c in hib])
+
+
+def _draw_current_axes(ax, x_raw, raw_mA, x_fil, fil_mA, lo_mA, hi_mA,
+                       title, xlabel, note=None):
+    """Shared rendering: faint raw for context, a decimated filtered line, ripple band.
+
+    Draw order matters. The raw series is the busiest thing on the axes and, at full
+    opacity over tens of thousands of points, it swamps the result it is meant to provide
+    context for - so it goes underneath at 45% alpha and thin. The filtered line goes on
+    top at full strength. The min-max band sits between them so the spread that averaging
+    removed stays visible instead of being quietly discarded.
+
+    The zero line is drawn because after baseline subtraction zero is a meaningful level -
+    idle should sit ON it, and a trace that does not is telling you the baseline estimate
+    picked the wrong span.
+    """
+    ax.plot(x_raw, raw_mA, lw=0.4, color="#1f77b4", alpha=0.45, zorder=1,
+            label="raw (%d pts)" % len(raw_mA))
+    if lo_mA is not None and hi_mA is not None:
+        ax.fill_between(x_fil, lo_mA, hi_mA, color="#d62728", alpha=0.20, lw=0, zorder=2,
+                        label="filtered spread (min-max per block)")
+    ax.plot(x_fil, fil_mA, lw=1.2, color="#d62728", zorder=4,
+            label="filtered (%d pts)" % len(fil_mA))
+    ax.axhline(0.0, color="#555555", lw=0.6, alpha=0.6, zorder=0)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Current (mA)")
+    ax.set_title(title)
+    ax.legend(loc="upper left", framealpha=0.9, fontsize=8)
+    ax.grid(alpha=0.3)
+    if note:
+        ax.text(0.995, 0.97, note, transform=ax.transAxes, ha="right", va="top",
+                fontsize=8, color="#333333", linespacing=1.4,
+                bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbbbbb",
+                          alpha=0.88))
+
+
+def _plot_note(info, cal, k):
+    """Corner annotation: the settings the trace was made with, and any range fault."""
+    if not info:
+        return None
+    bits = ["HiRes: boxcar %d @ %.0f Hz  ->  %.1f Hz -3 dB, +%.1f bit"
+            % (info["boxcar_w"], info["fs_hz"], info["f3db_hz"], info["bits_gained"])]
+    sat = info.get("saturation") or {}
+    if sat.get("frac", 0.0) > 0.001:
+        bits.append("CLIPPED: %.1f%% of samples at %.0f mA full scale - values are a floor"
+                    % (100.0 * sat["frac"], cal["adc_max"] * k))
+    return "\n".join(bits)
+
+
+def _do_plot(ts, raw, final, k, path, save_to=None, block_w=1, info=None, decimate=True,
+             cal=None):
+    """Raw context in blue; the HiRes result in red as a decimated line plus ripple band.
+
+    The red trace is decimated rather than drawn per sample because a 48,000-point line on
+    a 1,300-pixel axis puts 37 samples in every pixel column, and matplotlib paints the
+    full vertical extent of each column - so a correctly filtered trace renders as a solid
+    block of colour and widening the window appears to do nothing. Emitting one point per
+    averaged block is what the scope displays in HiRes. See decimate_blocks().
+    """
     try:
         import matplotlib
         matplotlib.use("Agg" if save_to else "TkAgg")
@@ -898,16 +1176,13 @@ def _do_plot(ts, raw, final, k, path, save_to=None):
         return "  plot unavailable: %s" % exc
     t0 = ts[0]
     x = [(t - t0) / 1000.0 for t in ts]
+    raw_mA, idx, fil_mA, lo_mA, hi_mA = plot_series(ts, raw, final, k, block_w, decimate)
+    x_fil = [x[i] for i in idx]
 
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.plot(x, [c * k for c in raw], lw=0.5, color="#1f77b4", label="raw", zorder=1)
-    ax.plot(x, [c * k for c in final], lw=0.9, color="#d62728", label="filtered", zorder=3)
-    ax.set_xlabel("time (s)")
-    ax.set_ylabel("current (mA)")
-    ax.set_title("%s  -  raw vs filtered" % os.path.basename(path))
-    ax.legend(loc="upper left", framealpha=0.9)
-    ax.grid(alpha=0.3)
-
+    _draw_current_axes(ax, x, raw_mA, x_fil, fil_mA, lo_mA, hi_mA,
+                       "%s  -  raw vs filtered" % os.path.basename(path),
+                       "time (s)", _plot_note(info, cal or DEFAULT_CAL, k))
     fig.tight_layout()
     if save_to:
         fig.savefig(save_to, dpi=140)
@@ -1027,7 +1302,7 @@ class CurrentFilterGUI:
             utc_offset_timezone(offset)
             window = int(self.window_var.get())
             if window < 1:
-                raise ValueError("Median window must be positive")
+                raise ValueError("Boxcar window must be positive")
         except ValueError as exc:
             messagebox.showerror("Invalid option", str(exc))
             return
@@ -1068,18 +1343,14 @@ class CurrentFilterGUI:
         import matplotlib.dates as mdates
 
         self.axes.clear()
-        self.axes.plot(result["wall_times"], result["raw_mA"], lw=0.5,
-                       color="#1f77b4", label="Raw", zorder=1)
-        self.axes.plot(result["wall_times"], result["filtered_mA"], lw=0.9,
-                       color="#d62728", label="Filtered", zorder=3)
-        self.axes.set_xlabel("Local time (UTC%+.2f)" % result["utc_offset"])
-        self.axes.set_ylabel("Current (mA)")
-        self.axes.set_title("%s — raw vs filtered" % os.path.basename(result["path"]))
+        _draw_current_axes(
+            self.axes, result["wall_times"], result["raw_mA"],
+            result["blk_times"], result["blk_mA"], result["blk_lo"], result["blk_hi"],
+            "%s — raw vs filtered" % os.path.basename(result["path"]),
+            "Local time (UTC%+.2f)" % result["utc_offset"], result.get("note"))
         self.axes.xaxis.set_major_formatter(
             mdates.DateFormatter("%H:%M:%S",
                                  tz=utc_offset_timezone(result["utc_offset"])))
-        self.axes.legend(loc="upper left", framealpha=0.9)
-        self.axes.grid(alpha=0.3)
         self.figure.autofmt_xdate()
         self.figure.tight_layout()
         self.canvas.draw()
@@ -1093,10 +1364,11 @@ def process_current_file(path, window, utc_offset_hours, rtc_path, out_csv, out_
     tz = utc_offset_timezone(utc_offset_hours)
     k = counts_to_mA_factor(cal)
     baseline, _, _ = estimate_baseline(ts, ct)
-    filtered, _info = hires_pipeline(ts, ct, cal["adc_max"], baseline, window)
+    filtered, info = hires_pipeline(ts, ct, cal["adc_max"], baseline, window)
     wall_times = [wall_datetime_local(t, rtc_anchor, utc_offset_hours) for t in ts]
-    raw_mA = [v * k for v in ct]
+    raw_mA, idx, blk_mA, blk_lo, blk_hi = plot_series(ts, ct, filtered, k, window, True)
     filtered_mA = [v * k for v in filtered]
+    blk_times = [wall_times[i] for i in idx]
     charge_mC, _ = integrate_charge(ts, filtered, k)
 
     with io.open(out_csv, "w", encoding="utf-8", newline="") as f:
@@ -1109,22 +1381,21 @@ def process_current_file(path, window, utc_offset_hours, rtc_path, out_csv, out_
 
     from matplotlib.figure import Figure
     import matplotlib.dates as mdates
+    note = _plot_note(info, cal, k)
     fig = Figure(figsize=(14, 6), dpi=100)
     ax = fig.add_subplot(111)
-    ax.plot(wall_times, raw_mA, lw=0.5, color="#1f77b4", label="Raw", zorder=1)
-    ax.plot(wall_times, filtered_mA, lw=0.9, color="#d62728", label="Filtered", zorder=3)
-    ax.set_xlabel("Local time (UTC%+.2f)" % utc_offset_hours)
-    ax.set_ylabel("Current (mA)")
-    ax.set_title("%s — raw vs filtered" % os.path.basename(path))
+    _draw_current_axes(ax, wall_times, raw_mA, blk_times, blk_mA, blk_lo, blk_hi,
+                       "%s — raw vs filtered" % os.path.basename(path),
+                       "Local time (UTC%+.2f)" % utc_offset_hours, note)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S", tz=tz))
-    ax.legend(loc="upper left", framealpha=0.9)
-    ax.grid(alpha=0.3)
     fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(out_png, dpi=140)
 
     return {"path": path, "ts": ts, "wall_times": wall_times,
             "raw_mA": raw_mA, "filtered_mA": filtered_mA,
+            "blk_times": blk_times, "blk_mA": blk_mA,
+            "blk_lo": blk_lo, "blk_hi": blk_hi, "note": note, "info": info,
             "baseline": baseline, "charge_mC": charge_mC,
             "utc_offset": utc_offset_hours, "out_csv": out_csv, "out_png": out_png}
 
@@ -1213,7 +1484,7 @@ def selftest():
     check("bias is >70x the honest residual",
           mean_clamp > 70 * abs(mean_plain), True)
 
-    out, nrep = reject_full_scale([100, 100, 16383, 100, 100], 16383)
+    out, nrep, sat = reject_full_scale([100, 100, 16383, 100, 100], 16383)
     check("full-scale sample replaced", out[2], 100)
     check("replacement count", nrep, 1)
 
@@ -1247,6 +1518,41 @@ def selftest():
     check("1 count = 0.012208 mA", round(k, 6), 0.012208, 1e-6)
     check("full scale = 200 mA", round(k * DEFAULT_CAL["adc_max"], 3), 200.0, 1e-3)
 
+    # --- saturation vs glitch ------------------------------------------------
+    # An isolated rail sample is a glitch and gets repaired; a sustained run is the ADC
+    # telling the truth about being out of range and must survive untouched, because
+    # rewriting it biases the mean-preserving boxcar that follows.
+    out2, nrep2, sat2 = reject_full_scale([100, 100, 16383, 16383, 16383, 100], 16383)
+    check("sustained rail run is NOT repaired", out2[2], 16383.0)
+    check("sustained rail run replaces nothing", nrep2, 0)
+    check("sustained rail run counted as saturation", sat2["n_saturated"], 3)
+    check("longest saturated run reported", sat2["longest_run"], 3)
+
+    out3, nrep3, sat3 = reject_full_scale([100, 16383, 16383, 100], 16383)
+    check("a run of 2 is still a glitch", nrep3, 2)
+    check("run of 2 repaired from both brackets", out3[1], 100.0)
+    check("run of 2 leaves no saturation", sat3["n_saturated"], 0)
+
+    # --- decimation is mean-preserving --------------------------------------
+    # The whole point of HiRes is that it buys bits without moving the mean. A decimated
+    # block series must therefore carry the same average as the samples it came from.
+    tsd = [i * 1.0 for i in range(100)]
+    vd_ = [float(i) for i in range(100)]
+    td, md, lod, hid = decimate_blocks(tsd, vd_, 10)
+    check("decimation emits n/w points", len(md), 10)
+    check("decimation preserves the mean",
+          round(sum(md) / len(md), 9), round(sum(vd_) / len(vd_), 9), 1e-9)
+    check("block min tracks the block", lod[0], 0.0)
+    check("block max tracks the block", hid[0], 9.0)
+    check("w=1 decimation is a passthrough",
+          len(decimate_blocks(tsd, vd_, 1)[1]), 100)
+
+    # --- bandwidth <-> window round trip -------------------------------------
+    check("window from bandwidth is odd", window_for_bandwidth(20.0, 800.0) % 2, 1)
+    _w = window_for_bandwidth(20.0, 800.0)
+    check("window from bandwidth round-trips",
+          round(boxcar_bandwidth_hz(_w, 800.0)[0], 0), 20.0, 1.5)
+
     anchor = (1000.0, datetime.datetime(2026, 9, 8, 14, 45, 45))
     check("RTC mapping preserves anchor second",
           1 if wall_time_local(1000.0, anchor) == "2026-09-08T14:45:45.000000" else 0, 1)
@@ -1275,6 +1581,16 @@ def main():
                     help="boxcar (High-Resolution) width in samples, default %(default)s "
                          "= ~22 Hz and +2.0 effective bits at the achieved ~800 Hz. "
                          "N = 0.443 * fs / f_3dB for a bandwidth target.")
+    ap.add_argument("--bandwidth", type=float, default=None, metavar="HZ",
+                    help="pick --window from a -3 dB bandwidth target instead, using the "
+                         "ACHIEVED sample rate read from the file. This is the setting to "
+                         "use when matching a scope: give it the scope's HiRes bandwidth.")
+    ap.add_argument("--no-decimate", action="store_true",
+                    help="plot the filtered trace at the full sample rate instead of one "
+                         "point per averaged block. The frequency response is identical; "
+                         "the per-sample line just overdraws itself into a solid band on "
+                         "any axis narrower than the record, which is what made a "
+                         "correctly filtered trace look unfiltered.")
     ap.add_argument("--despike-window", type=int, default=DESPIKE_WINDOW, metavar="N",
                     help="Hampel despike window, default %(default)s")
     ap.add_argument("--despike-sigma", type=float, default=DESPIKE_SIGMA, metavar="K",

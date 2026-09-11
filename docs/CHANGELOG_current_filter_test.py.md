@@ -4,6 +4,53 @@ Newest entries first. This changelog records why changes were made as well as wh
 
 ---
 
+## 2026-09-11 (later) — Decimate like the scope; stop rewriting saturation as noise — `[UNCONFIRMED]`
+
+Driven by a real field capture, `09111632_currentFast.csv`, whose filtered trace was a red
+band sitting in the middle of the raw band — visually indistinguishable from no filtering at
+all. Three separate defects, only one of which was a filter problem.
+
+**1. Sustained saturation was repaired as if it were glitch noise (Issue 60).**
+`reject_full_scale()` rewrote every sample at the rail. An isolated rail sample is a glitch
+and repairing it is right; a *run* of them is the ADC truthfully reporting it is out of
+range, and the replacement drawn from the bracketing samples is systematically low. That
+bias then went into a mean-preserving boxcar, which propagated it faithfully across the
+window — the filtered line landing below the raw envelope. It now walks runs: ≤ 2 samples
+repaired from the brackets of the whole run (the old per-sample 3-point median could not
+even repair a run of 2 — its neighbour was another rail sample), longer runs kept and
+counted. Returns `(filtered, n_replaced, sat)`.
+
+**2. The HiRes stage averaged but never decimated (Issue 62).**
+The previous entry below states HiRes correctly — *"average N consecutive samples taken at
+the full rate, emit one point"* — and implemented only the averaging. 32,000 points on a
+1,300-pixel axis is 24 samples per pixel column, all painted to full vertical extent, so
+surviving ripple renders as a solid band and widening the window appears to do nothing.
+`decimate_blocks()` now emits one point per block for the plot, with the block min/max drawn
+as a band so the removed ripple stays visible rather than being quietly discarded. The CSV
+and `integrate_charge()` are untouched — decimation is a display operation, and making it a
+data operation would change the charge integral's sample spacing for no benefit.
+
+Verified on a synthetic reproduction of the real capture (26 mA offset, 3.05% saturation,
+137 Hz + 311 Hz content, 800 Hz, 40 s): same filter, same bandwidth, same data — 970 plotted
+points instead of 32,000, and the envelope becomes readable.
+
+**3. A 26 mA idle offset eats 13% of the range (Issue 61).**
+Reported, not fixed: it is a hardware offset. New `RANGE / SATURATION` report section, placed
+*before* the filter tables on purpose — if the front end clipped or the offset ate the range,
+nothing below that point can be fixed by choosing a better window, and reading the filter
+numbers first sends you chasing the wrong thing.
+
+**Also:** `window_for_bandwidth()` and `--bandwidth HZ` — specify the corner frequency the
+way a scope states it, resolved against the *achieved* rate read from the timestamps, rather
+than a sample count that means nothing without also knowing that rate. `--no-decimate`
+restores the per-sample line. Plot rendering is now shared by the CLI, the GUI's saved PNG
+and the GUI's on-screen canvas, which previously each rebuilt it slightly differently.
+
+Nine new selftest checks: glitch-vs-saturation classification, run-of-2 repair, decimation
+mean preservation, and the bandwidth↔window round trip.
+
+---
+
 ## 2026-09-11 — Replace median-5 with the actual High-Resolution operation; remove a charge-fabricating bias — `[UNCONFIRMED]`
 
 **Stated goal:** the processed current should resemble a **Keysight scope in

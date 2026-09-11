@@ -31,6 +31,22 @@ class VertiSeaGUI:
     # connect_serial() rejects it rather than trying to open a port by this name.
     NO_PORTS = "<no serial ports>"
 
+    # USB vendor IDs of the two USB-serial bridges that can appear in this system, and
+    # they must not be confused for each other:
+    #
+    #   0x1A86 (WCH)  - the CH340E ON THE BUOY ITSELF. Its RTS line is wired to the
+    #                   Artemis reset pin, so opening this port can reboot the board
+    #                   mid-log. It also carries USB_DEBUG text, never telemetry packets
+    #                   (telemetry goes out Serial1 to the radio unless USB_TELEM is set),
+    #                   so connecting here shows N/A in every field AND risks the log.
+    #   0x0403 (FTDI) - the RFD900x ground modem, which is the port this GUI is for.
+    #
+    # Detected rather than left to the operator because the failure is silent: the GUI
+    # connects, reports "Connected", shows nothing, and the only visible symptom is on the
+    # buoy - the heartbeat LED stops, because the board restarted into setup() (LED solid
+    # on) or halted. That was observed on 2026-09-02 and again on 2026-09-11.
+    BUOY_USB_VID = 0x1A86
+
     def __init__(self, root):
         self.root = root
         root.title("VertiSea Telemetry Monitor")
@@ -267,6 +283,44 @@ class VertiSeaGUI:
             menu.add_command(label=p, command=lambda v=p: self.port_var.set(v))
         self.port_var.set(ports[0] if ports else self.NO_PORTS)
 
+    @staticmethod
+    def _port_info(port):
+        """The list_ports entry for *port*, or None if it has since disappeared."""
+        try:
+            for p in serial.tools.list_ports.comports():
+                if p.device == port:
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _confirm_if_buoy_port(self, port):
+        """Warn before opening the buoy's own USB port. Returns True to proceed.
+
+        Not a hard block: connecting to the buoy over USB is legitimate when the firmware
+        is built with USB_TELEM 1 and USB_DEBUG 0, which is how telemetry is checked
+        without a radio pair. It just must not be done by accident during a logging run.
+        """
+        info = self._port_info(port)
+        if info is None or getattr(info, "vid", None) != self.BUOY_USB_VID:
+            return True
+        return messagebox.askokcancel(
+            "That looks like the buoy, not the radio",
+            f"{port} is a CH340 bridge — the USB port on the buoy itself, not the "
+            f"RFD900x ground modem.\n\n"
+            "Two things follow:\n\n"
+            "1. Opening it can RESET the board. The CH340E RTS line drives the Artemis "
+            "reset pin. This program holds RTS/DTR low, but the Windows CH340 driver "
+            "still changes the line state on open and on close, and a reset pulse can "
+            "get through. A reset mid-log restarts millis(), starts a new file, and "
+            "stops the heartbeat LED while setup() runs (LED solid ON).\n\n"
+            "2. Unless the firmware was built with USB_TELEM 1 and USB_DEBUG 0, this "
+            "port carries debug TEXT, not telemetry packets — every field will read "
+            "N/A no matter how long you wait.\n\n"
+            "Connect to the RFD900x modem instead, or use \"Load BIN File\" to read the "
+            "SD log, which needs no serial connection at all.\n\n"
+            "Open it anyway?")
+
     def connect_serial(self):
         port = self.port_var.get()
         if not port or port == self.NO_PORTS:
@@ -283,6 +337,9 @@ class VertiSeaGUI:
         # stays locked until the process exits, so reconnecting fails with "access
         # denied" and the user has to restart the program. (Issue 50)
         self._close_serial()
+
+        if not self._confirm_if_buoy_port(port):
+            return
 
         try:
             # IMPORTANT — do not let pyserial assert RTS/DTR on open.

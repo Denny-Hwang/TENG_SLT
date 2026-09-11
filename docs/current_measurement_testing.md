@@ -556,11 +556,27 @@ random walk growing as √t rather than t.
 ### The pipeline now
 
 ```
-1. reject_full_scale()   samples pinned at the rail are not measurements
+1. reject_full_scale()   repair isolated rail GLITCHES; keep sustained SATURATION and
+                         report it — the two are different events (Issue 60)
 2. hampel_filter()       remove impulsive outliers ONLY; everything else passes untouched
 3. boxcar_filter()       the HiRes stage — this is what buys effective bits
 4. subtract_baseline()   last, and without clamping
+5. decimate_blocks()     one point per averaged block — the other half of HiRes, applied
+                         to the PLOT only, never to the CSV or the charge integral
 ```
+
+Step 5 was missing until 2026-09-11 and its absence was the single most misleading thing
+about this tool (Issue 62). A sliding boxcar has the right frequency response but returns
+one output sample per input sample, so a 40 s capture at 800 Hz still plots 32,000 points
+across ~1,300 pixels — 24 samples per pixel column, every column painted to its full
+vertical extent. Residual ripple then renders as a solid band and a correctly filtered
+trace is indistinguishable from an unfiltered one. A scope in HiRes emits one point per
+block, which is why its trace looks clean at the same bandwidth on the same signal.
+
+The decimated plot draws the block mean as a line and the block min/max as a band behind
+it. The band is not decoration: it is the ripple that averaging removed. On a clean capture
+it collapses onto the line; if it stays wide, the record is saturated or aliased and the
+line is hiding it.
 
 Step 2 is a Hampel filter: local median ± n·MAD (scaled by 1.4826), replacing a sample only
 if it exceeds the threshold. Unlike a blanket median it rewrites *only* the bad samples —
