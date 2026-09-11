@@ -5,6 +5,38 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-11 — Add `environment.yml`; teach the `.bat` launchers the conda layout — `[UNCONFIRMED]`
+
+**Why:** the host-side Python setup was three words of prose (`pip install pyserial
+matplotlib`) with no pinned interpreter and no record of what the code actually needs.
+
+`environment.yml` (conda-forge, `name: vertisea`) pins Python 3.11 and lists the real
+dependency set, which is short on purpose: `pyserial`, `matplotlib-base`, `tk`, plus
+`pytest`/`pyflakes` as optional conveniences. Two choices worth stating:
+
+- **`matplotlib-base`, not `matplotlib`.** The full package pulls in PyQt (~100 MB) that
+  nothing here uses — every plot goes through `matplotlib.backends.backend_tkagg`.
+- **`tk` listed explicitly.** `tkinter` ships with CPython, but under conda the Tk runtime
+  it binds to is a separate package; without it `import tkinter` fails at run time even
+  though the module exists. That is a confusing failure to debug from a bare env file.
+
+The file also records that `vertisea_protocol.py` and the tests are stdlib-only *by design*,
+so a `.BIN` converts on a machine with no packages at all. That property is easy to lose
+accidentally and worth writing down where someone adding a dependency will see it.
+
+**`.bat` launcher fix.** Both launchers checked only `.venv\Scripts\python.exe`, the
+venv/virtualenv layout. Conda puts `python.exe` at the environment *root*, so a conda
+environment created in the project folder was silently ignored and the launcher fell
+through to whatever Python was on `PATH` — which on a machine with several Pythons is a
+quiet way to run the tools against the wrong interpreter. Both layouts are now checked, in
+order, before the `PATH` fallback.
+
+README §4 documents both routes and the one non-obvious consequence: a *named* conda
+environment works fine from an activated prompt, but only an environment created **at
+`.\.venv`** makes double-clicking the `.bat` work.
+
+---
+
 ## 2026-09-11 — Repository review: fix broken links, correct the `gyro_bias` unit error, prune a captured log — `[UNCONFIRMED]`
 
 **Why:** a full-repository review. Three classes of problem were mechanical enough to fix

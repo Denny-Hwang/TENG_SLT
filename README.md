@@ -74,6 +74,7 @@ program (**Load BIN File**). That is the only maintained parser.
 | `Calibration/` | `calibrateMag.m`, the calibration workbook, and raw accel measurements |
 | `tools/` | Throwaway benchmark sketches (SD write paths, ADC timer/DMA). Not part of the deployed system |
 | `archived/` | Superseded material kept for the record only — nothing here is read by any build step. See [`archived/README.md`](archived/README.md) |
+| `environment.yml` | Conda environment for the host-side Python tools |
 | `docs/` | Reference documentation and per-file changelogs |
 
 ---
@@ -150,11 +151,35 @@ Board: **SparkFun RedBoard Artemis Nano**. Install the SparkFun Apollo3 boards p
 
 ### Ground Station (Python)
 
+Conda (reproducible, recommended):
+
+```
+conda env create -f environment.yml
+conda activate vertisea
+```
+
+Or with pip into any Python 3.8+:
+
 ```
 pip install pyserial matplotlib
 ```
 
-Python 3.8 or later. `tkinter` ships with standard Python distributions.
+`tkinter` ships with CPython, but under conda the Tk runtime it binds to is a separate
+package — `environment.yml` lists it, so `import tkinter` works out of the box.
+
+**Only the GUI needs these.** `vertisea_protocol.py` and the tests are stdlib-only by
+design, so a `.BIN` can be converted on a machine with a bare Python and no packages:
+
+```
+python vertisea_protocol.py LOG00001.BIN
+```
+
+> **If you want the `.bat` launchers to use your environment,** create it inside the
+> project as `.venv` (`conda env create -f environment.yml -p .\.venv`). They check
+> `.venv\Scripts\python.exe` (venv layout) and `.venv\python.exe` (conda layout), in
+> that order, before falling back to whatever Python is on `PATH`. A named conda
+> environment elsewhere works too, but then the `.bat` only finds it from an already
+> activated prompt — double-clicking it will not.
 
 ### MATLAB
 

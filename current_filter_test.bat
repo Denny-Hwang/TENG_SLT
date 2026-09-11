@@ -9,7 +9,13 @@ pushd "%~dp0" || (
     exit /b 1
 )
 
-rem Prefer a working project virtual environment, then fall back to a system Python.
+rem Prefer a working project environment, then fall back to a system Python.
+rem
+rem TWO layouts are checked because they differ, and checking only the first one meant a
+rem conda environment created in the project folder was silently ignored and the launcher
+rem fell through to whatever Python happened to be on PATH:
+rem     venv / virtualenv -> .venv\Scripts\python.exe
+rem     conda -p .\.venv  -> .venv\python.exe        (conda puts python.exe at the root)
 if exist "%~dp0.venv\Scripts\python.exe" (
     "%~dp0.venv\Scripts\python.exe" -c "import sys" >nul 2>&1
     if not errorlevel 1 (
@@ -18,6 +24,14 @@ if exist "%~dp0.venv\Scripts\python.exe" (
     )
     if exist "%~dp0.venv\Lib\site-packages" (
         set "PYTHONPATH=%~dp0.venv\Lib\site-packages;%PYTHONPATH%"
+    )
+)
+
+if exist "%~dp0.venv\python.exe" (
+    "%~dp0.venv\python.exe" -c "import sys" >nul 2>&1
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%~dp0.venv\python.exe"
+        goto run_python
     )
 )
 

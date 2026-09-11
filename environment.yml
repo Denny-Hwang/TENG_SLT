@@ -1,0 +1,49 @@
+# Conda environment for the VertiSea host-side tools.
+#
+#   conda env create -f environment.yml
+#   conda activate vertisea
+#
+# This covers ONLY the Python side — the ground station, the SD log parser, the
+# harvested-current bench and the tests. The firmware is built by the Arduino IDE with the
+# SparkFun Apollo3 package and has nothing to do with this environment; see README §4.
+#
+# The dependency list is deliberately short because most of the code is stdlib-only by
+# design: `vertisea_protocol.py` (packet layouts, parser, CSV export) and
+# `tests/test_binary_protocol.py` import nothing outside the standard library, so a log can
+# be converted on a machine with a bare Python and no packages at all:
+#
+#     python vertisea_protocol.py LOG00001.BIN
+#
+# Only the GUI needs pyserial/matplotlib, and only `--plot` in current_filter_test.py needs
+# matplotlib. Keep it that way when adding code.
+name: vertisea
+
+channels:
+  - conda-forge
+
+dependencies:
+  # 3.8 is the documented floor. 3.11 is a deliberate choice over "latest": the code uses
+  # no newer syntax, and older Python is what a lab machine is likely to already have, so
+  # staying a little behind the bleeding edge keeps the two interchangeable.
+  - python=3.11
+
+  # Ground station serial link (`import serial`). The conda package is named pyserial.
+  - pyserial>=3.5
+
+  # matplotlib-base rather than matplotlib: the full package drags in PyQt (~100 MB) that
+  # nothing here uses. Every plot in this repo goes through the Tk backend
+  # (`matplotlib.backends.backend_tkagg`), which needs `tk` below, not Qt.
+  - matplotlib-base>=3.5
+
+  # tkinter itself ships with CPython, but the Tk runtime it binds to is a separate conda
+  # package. Without it `import tkinter` fails at run time even though the module exists.
+  - tk
+
+  # Optional: the tests run under plain `python tests/test_binary_protocol.py` with no
+  # test runner at all. pytest is here only because `python -m pytest tests/ -q` is a
+  # nicer way to run them while iterating.
+  - pytest
+
+  # Optional: catches undefined names and unused imports. Used during review; harmless to
+  # drop if you want a smaller environment.
+  - pyflakes
