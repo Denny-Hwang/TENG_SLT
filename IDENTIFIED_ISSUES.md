@@ -59,6 +59,17 @@ issue is fixed; do not delete resolved entries.
 | 38 | 🟡 Medium | `vertisea_plot_v7.py` | BIN loader mishandles the expected `IMU_RAW_ONLY=1` user experience | ⚠ Open |
 | 39 | 🟢 Low | `VertiSea.ino` / `vertisea_plot_v7.py` | `integ_s` comments and GUI “duty” interpretation no longer match measured-dt integration | ⚠ Open (documentation/semantics) |
 | 40 | 🟡 Medium | `vertisea_plot_v7.py` | SD parser materialises every expanded sample and blocks the Tk main thread | ⚠ Open |
+| 41 | 🔴 Critical | `VertiSea.ino` | Accel and gyro are handed to Madgwick in two different body frames (accel X negated, gyro Y negated) | ⚠ Open |
+| 42 | 🟠 High | `VertiSea.ino` / docs | `IMUCal.gyro_bias[]` is millidegrees/s but was documented as °/s — the 2026-04-02 recalibration was applied 1000× too small | 🔄 Docs corrected 2026-09-11; constants still need re-deriving |
+| 43 | 🟠 High | `vertisea_plot_v7.py` | GUI raises `TypeError` at startup when the machine has no serial ports, blocking the offline "Load BIN File" workflow | ⚠ Open |
+| 44 | 🟠 High | `vertisea_plot_v7.py` | An unplugged radio raises inside the Tk `after()` callback, silently stopping all GUI updates permanently | ⚠ Open |
+| 45 | 🟡 Medium | `VertiSea.ino` | `TYPE_CURRENT_STATS.n_dropped` is cumulative since boot while `n_samples` resets per window — the pair cannot be compared | ⚠ Open |
+| 46 | 🟡 Medium | `VertiSea.ino` | Magnetometer is a fatal boot dependency but is never read; with `IMU_RAW_ONLY 0` it silently logs constant zeros | ⚠ Open |
+| 47 | 🟡 Medium | `VertiSea.ino` | Every sensor init failure halts in `while(1)` with no watchdog — a field buoy bricks itself and logs nothing | ⚠ Open |
+| 48 | 🟡 Medium | `vertisea_plot_v7.py` | Live parser redraws three matplotlib canvases per packet inside the drain loop | ⚠ Open |
+| 49 | 🟢 Low | `vertisea_plot_v7.py` | `_ts10_last` is only advanced by `0x06`, so the RPM series can mis-handle a ts10 wrap | ⚠ Open |
+| 50 | 🟢 Low | `vertisea_plot_v7.py` | `connect_serial()` never closes a previously opened port | ⚠ Open |
+| 51 | 🟢 Low | `vertisea_plot_v7.py` | `load_bin_file()` summary omits `imu_raw`, `rtc_event`, `fixed_cal`, `stab_cal` — the default build reports zero IMU records | ⚠ Open |
 
 ---
 
@@ -68,7 +79,7 @@ issue is fixed; do not delete resolved entries.
 
 ### Issue 1 — 🔴 Critical: `while (!Serial)` blocks boot without USB
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -102,7 +113,7 @@ silently discarded when no USB host is connected.
 
 ### Issue 2 — 🔴 Critical: Log filename collisions can append sessions
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`
 **Status:** 🔄 Fix implemented 2026-09-04; hardware verification pending
 
 **Description:**
@@ -132,7 +143,7 @@ same-minute collisions, invalid RTC fallback, and preservation of all pre-existi
 
 ### Issue 3 — 🔴 Critical: SD write errors silently ignored after `setup()`
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved 2026-09-04 in the buffered writer. Arduino SD 1.3.0's public
 `File.flush()` API returns `void`, so a distinct metadata-sync result is not available.
 
@@ -164,7 +175,7 @@ The `sdError` flag is never cleared; a power-cycle is required to reset.
 
 ### Issue 4 — 🟠 High: `vertDisp` / `vertVel` variable shadowing
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**  
@@ -185,7 +196,7 @@ sufficient and will be correctly updated by the inner block.
 
 ### Issue 5 — 🟠 High: `TYPE_MAG` packet uses `millis()` instead of `nowMs`
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**  
@@ -205,7 +216,7 @@ milliseconds). Affects time-alignment in post-processing.
 
 ### Issue 6 — 🟠 High: Vertical accel unit error in integration
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**  
@@ -227,7 +238,7 @@ incorrect use of `ax/ay/az` values in future code.
 
 ### Issue 7 — 🟠 High: GPS packet not written when no fix available
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**  
@@ -274,7 +285,7 @@ on line 11 to reflect the actual packet content.
 
 ### Issue 9 — 🟠 High: `rtc.getYear()` double-subtraction of 2000
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`
 **Status:** ↪ Superseded by Issue 28
 
 > **Audit correction (2026-09-04):** This entry's library interpretation was wrong.
@@ -308,7 +319,7 @@ source or the `rtcEvt` CSV from a known deployment.
 
 ### Issue 10 — 🟡 Medium: `imuReady` static initialisation
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -324,7 +335,7 @@ never reset. This is correct behaviour but worth noting as intentional.
 
 ### Issue 11 — 🟡 Medium: `disp_mm` declared but never used
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -339,7 +350,7 @@ block uses a separately computed `int16_t vertDisp_mm` local variable.
 
 ### Issue 12 — 🟡 Medium: `pitch` and `roll` statics never used
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -354,7 +365,7 @@ roll are accessed directly from `lastFixedIMU.pitch` and `lastFixedIMU.roll`.
 
 ### Issue 13 — 🟡 Medium: Shadowed variables in `setup()` GPS sync block
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -374,7 +385,7 @@ the outer scope is ever referenced.
 
 ### Issue 14 — 🟡 Medium: MATLAB parser stops on unknown packet type
 
-**File:** [`parse_vertisea_log_v4.m`](parse_vertisea_log_v4.m)
+**File:** `parse_vertisea_log_v4.m` (deleted 2026-09-03; recoverable from git history at `9f5019f`)
 **Status:** ⛔ Obsolete — `parse_vertisea_log_v4.m` was retired 2026-09-03
 
 **Description:**  
@@ -419,7 +430,7 @@ remain readable only for old logs.
 
 ### Issue 16 — 🟡 Medium: `ts10` timestamp wraps after ~655 seconds
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`; [`vertisea_plot_v7.py`](vertisea_plot_v7.py)
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`; [`vertisea_plot_v7.py`](vertisea_plot_v7.py)
 **Status:** ✅ Resolved
 
 **Description:**  
@@ -439,7 +450,7 @@ handle it in the Python script by detecting backward jumps and offsetting accord
 
 ### Issue 17 — 🟡 Medium: `vertDisp_mm` computed twice in telemetry block
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -461,7 +472,7 @@ referred to the outer static (always 0), so both were 0.
 
 ### Issue 18 — 🟢 Low: `printAligned()` defined but never called — resolved
 
-**File:** [`VertiSea.ino`](VertiSea.ino)
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 **Status:** ✅ Resolved 2026-09-04 — dead helper removed during pre-commit cleanup.
 
 > **Audit update (2026-09-04):** Active calls were later commented out with the rest of the
@@ -482,7 +493,7 @@ used in a previous debug print block that was removed.
 
 ### Issue 19 — 🟢 Low: Debug block is empty — resolved
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`
 **Status:** ✅ Resolved 2026-09-04 — the block now prints active SD queue occupancy,
 high-water, maximum write latency, and overrun diagnostics when `USB_DEBUG=1`; stale commented
 calibration output was removed.
@@ -505,7 +516,7 @@ or remove the block entirely.
 
 ### Issue 20 — 🟢 Low: `IMUData` accel comment says m/s² but values are in g
 
-**File:** [`VertiSea.ino`](VertiSea.ino)
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 **Status:** ✅ Resolved
 
 **Description:**  
@@ -524,7 +535,7 @@ The conversion to m/s² only happens in `computeVerticalAccel()` via multiplicat
 
 ### Issue 21 — 🟠 High: Vertical displacement drifts unboundedly
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`, integration block
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`, integration block
 **Status:** ✅ Resolved
 
 **Description:**
@@ -545,7 +556,7 @@ recommended path to improving accuracy. See also the Madgwick beta TODO in the f
 
 ### Issue 22 — 🔴 Critical: SD filename and `TYPE_RTC_EVENT` timestamp use UTC instead of local time
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -570,7 +581,7 @@ local-time variables. The RTC hardware register continues to hold UTC.
 
 ### Issue 23 — 🟠 High: Runtime accel bias calibration causes NaN pitch/roll
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `loop()`, bias calibration block
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `loop()`, bias calibration block
 **Status:** ✅ Resolved
 
 **Description:**
@@ -593,7 +604,7 @@ integration now runs unconditionally from the first IMU sample.
 
 ### Issue 24 — 🔴 Critical: ISM330DHCX sensor freeze causes near-zero accel → Madgwick diverges to NaN pitch/roll
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `collectIMUData_ISM()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `collectIMUData_ISM()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -662,7 +673,7 @@ does not recover the sensor. A future improvement could detect the freeze condit
 
 ### Issue 25 — 🟠 High: Both IMUs freeze simultaneously — shared I²C bus root cause
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `collectIMUData_ISM()`, `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `collectIMUData_ISM()`, `loop()`
 **Status:** ✅ Resolved
 
 > **Resolution:** root-caused to Issue 27 (GPS module absent from the I²C bus) and
@@ -779,7 +790,7 @@ corrupt both sensors' data simultaneously.
 
 ### Issue 26 — 🟡 Medium: `TELEM_SERIAL.begin(115200)` — verify RFD900 modem baud rate matches before next deployment
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`
 **Status:** ↪ Tracked by Issue 36
 
 > **Audit update (2026-09-04):** Keep the baud check in the Issue 36 radio verification
@@ -897,7 +908,7 @@ when the RF burst happens to overlap with an active `Wire` transfer.
 
 ### Issue 27 — 🔴 Critical: GPS module absent from I²C bus — `myGNSS.begin()` corrupts bus, freezing both IMUs
 
-**File:** [`VertiSea.ino`](VertiSea.ino) — `setup()`, `loop()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `setup()`, `loop()`
 **Status:** ✅ Resolved
 
 > **Resolution:** the `GPS_ENABLE` compile-time flag now gates every GPS code path —
@@ -1017,7 +1028,7 @@ not connected, and saves power by not polling a non-existent device.
 
 ### Issue 28 — 🟠 High: RV8803 `setYear`/`getYear` misuse — year written and read with wrong offset
 
-**File:** [`VertiSea.ino`](VertiSea.ino:762) (write), [`VertiSea.ino`](VertiSea.ino:803) (read) — `setup()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino#L762) (write), [`VertiSea.ino`](VertiSea/VertiSea.ino#L803) (read) — `setup()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -1080,7 +1091,7 @@ int rtcUtcYear = (int)rtc.getYear();  // getYear() already returns full 4-digit 
 
 ### Issue 29 — 🟢 Low: `char buf[32]` too small for RTC debug string — buffer overflow truncates output
 
-**File:** [`VertiSea.ino`](VertiSea.ino:843) — `setup()`, RTC fallback path
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino#L843) — `setup()`, RTC fallback path
 **Status:** ✅ Resolved
 
 **Description:**
@@ -1115,7 +1126,7 @@ char buf[40];
 
 ### Issue 30 — 🟠 High: RTC `begin()` intermittently fails — I²C power-on timing / bus-hang from prior session
 
-**File:** [`VertiSea.ino`](VertiSea.ino:563) — `setup()`, after `Wire.begin()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino#L563) — `setup()`, after `Wire.begin()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -1190,7 +1201,7 @@ an additional safety net for any residual transient failures.
 
 ### Issue 31 — 🟠 High: RTC reads 12-hour time when GPS disabled — `set24Hour()` not called before RTC fallback read
 
-**File:** [`VertiSea.ino`](VertiSea.ino:603) — `setup()`, after `rtc.begin()`
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino#L603) — `setup()`, after `rtc.begin()`
 **Status:** ✅ Resolved
 
 **Description:**
@@ -1260,7 +1271,7 @@ remains locked to the values set by `set_ylim()`.
 
 ### Issue 33 — 🟠 High: Hall-effect ISR fires on noise/bounce — spurious high RPM values
 
-**File:** [`VertiSea.ino`](../VertiSea.ino) — `hallISR()` / RPM measurement block
+**File:** [`VertiSea.ino`](VertiSea/VertiSea.ino) — `hallISR()` / RPM measurement block
 **Status:** ✅ Resolved
 
 **Description:**
@@ -1743,3 +1754,294 @@ instead of retaining all records, retaining only downsampled/selected data neede
 Run conversion in a worker thread or process and report progress through the Tk event loop.
 Keep the current in-memory API for short logs/tests if useful, but do not make it the only
 conversion path.
+
+
+---
+
+### Issue 41 — 🔴 Critical: accel and gyro reach Madgwick in two different body frames
+
+**Status:** Open, found by the 2026-09-11 code review. **Needs a hardware check before any fix.**
+
+**Where:** `VertiSea/VertiSea.ino`, `collectIMUData_ISM()`.
+
+```cpp
+float ax_g_raw  = -(accelData.xData - cal.accel_bias[0]) / cal.accel_scale[0];   // X negated
+float ay_g_raw  =  (accelData.yData - cal.accel_bias[1]) / cal.accel_scale[1];
+float az_g_raw  =  (accelData.zData - cal.accel_bias[2]) / cal.accel_scale[2];
+
+float gx_dps_raw =  (gyroData.xData - cal.gyro_bias[0]) * 0.001f;
+float gy_dps_raw = -(gyroData.yData - cal.gyro_bias[1]) * 0.001f;               // Y negated
+float gz_dps_raw =  (gyroData.zData - cal.gyro_bias[2]) * 0.001f;
+```
+
+Both comments say the negation exists "to match the buoy body-frame convention", but they
+negate **different axes**. The accelerometer is presented as `(−X, +Y, +Z)` and the gyroscope
+as `(+X, −Y, +Z)`. Two problems follow:
+
+1. **The two frames differ.** `diag(−1,+1,+1)` and `diag(+1,−1,+1)` are related by
+   `diag(−1,−1,+1)` — a 180° rotation about Z. Madgwick fuses both streams assuming they
+   share one body frame, so the gyro integrates rotation in a frame whose pitch and roll are
+   the *negatives* of what the accelerometer's gravity vector implies. The two inputs fight
+   each other continuously.
+2. **Each frame is left-handed.** Negating exactly one axis is a reflection, not a rotation.
+   Madgwick's quaternion algebra assumes a right-handed frame. A legitimate axis remap needs
+   an even number of sign flips (or a real rotation matrix).
+
+`betaDef = 0.5f` in the vendored library is roughly 12× Madgwick's recommended AHRS gain, which
+makes the filter behave almost like a smoothed accelerometer tilt sensor. That very likely
+**masks** this defect on the bench: the accelerometer dominates, so pitch/roll look plausible
+while the gyro contribution is largely overridden. Lowering `beta` for field use — already
+flagged as a TODO in `setup()` — would let the gyro assert itself and could make attitude
+*worse*, not better, until this is fixed.
+
+**Impact:** Attitude output (`0x01`/`0x02` pitch/roll/heading, the `0x06` telemetry packet,
+and everything downstream of it including `vertDisp`) is suspect. `IMU_RAW_ONLY 1` logs are
+unaffected — they store the driver output before any of this — which is a good reason to keep
+capturing raw logs until this is resolved.
+
+**Suggested resolution:** Recover the intended sensor→body transform from the mechanical
+drawing, express it as a single 3×3 rotation, and apply the *same* matrix to accel and gyro.
+Validate by rotating the assembled sled through known ±90° attitudes about each axis and
+checking that pitch/roll follow with the right sign and that the gyro integral agrees with
+the accelerometer-derived tilt. Do not tune `beta` until this is settled.
+
+---
+
+### Issue 42 — 🟠 High: `gyro_bias[]` is in millidegrees/s but was documented as °/s
+
+**Status:** Documentation corrected 2026-09-11. **The stabilized-IMU Y constant still needs re-deriving.**
+
+**Where:** `VertiSea/VertiSea.ino` (`IMUCal`), `docs/calibration.md`, `docs/firmware.md`,
+`docs/binary_protocol.md`, `README.md`.
+
+`collectIMUData_ISM()` subtracts `gyro_bias[i]` from the SparkFun driver's value *before* the
+`* 0.001f` mdps→dps conversion, so the constant is in **millidegrees per second**. Every
+document described it as °/s. That made the committed value −438.56 read as −438.56 °/s, and
+`docs/calibration.md` had grown a note asserting that a several-hundred-°/s zero-rate bias was
+"normal for this sensor" — it would be a sensor pegged near its ±500 °/s full scale.
+
+The error was not merely cosmetic. The calibration procedure told the operator the CSV columns
+and the constant shared units and to "not multiply by 1000". The 2026-04-02 recalibration
+followed it: a −0.065 °/s residual (= −65 mdps) was applied as −0.06, changing the constant
+from −438.5 to −438.56 instead of to ≈ −503.5. **The stabilized IMU's Y-axis gyro bias is
+therefore still uncorrected**, leaving roughly a −0.065 °/s residual rate that the Madgwick
+filter has to fight.
+
+**Impact:** A standing gyro bias on one axis biases attitude and, through it, `vertDisp`.
+Small compared to Issue 41, but in the same signal path.
+
+**Suggested resolution:** Re-derive both IMUs' gyro biases from a fresh stationary log. The
+easiest route is an `IMU_RAW_ONLY 1` capture: the `_imuRaw.csv` `*_g*_mdps` columns are the
+uncalibrated driver output in mdps, so their stationary mean *is* the new constant, with no
+unit arithmetic at all. Then confirm the residual is < 50 mdps on every axis.
+
+---
+
+### Issue 43 — 🟠 High: ground station crashes at startup on a machine with no serial ports
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `vertisea_plot_v7.py`, `VertiSeaGUI.__init__()`.
+
+```python
+ports = [p.device for p in serial.tools.list_ports.comports()]
+self.com_menu = tk.OptionMenu(conn_frame, self.port_var, *ports)
+```
+
+`tk.OptionMenu.__init__(self, master, variable, value, *values)` takes `value` as a **required**
+positional argument. With no ports enumerated, `*ports` expands to nothing and construction
+raises `TypeError: OptionMenu.__init__() missing 1 required positional argument: 'value'`
+before the window is ever shown.
+
+**Impact:** The documented offline workflow — "run the ground station and click Load BIN File,
+no serial connection needed" — is exactly the case where an analyst's laptop may enumerate no
+COM ports. The program dies with a traceback and no usable error.
+
+**Suggested resolution:** Pass a placeholder when the list is empty, e.g.
+`tk.OptionMenu(conn_frame, self.port_var, *(ports or ["<no ports>"]))`, and have
+`connect_serial()` reject the placeholder with a message box. `refresh_ports()` needs the same
+guard so the menu can recover once a device is plugged in.
+
+---
+
+### Issue 44 — 🟠 High: a serial error inside `update()` silently stops the entire GUI
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `vertisea_plot_v7.py`, `VertiSeaGUI.update()`.
+
+```python
+if self.ser and self.ser.in_waiting:
+    self.buffer.extend(self.ser.read(self.ser.in_waiting))
+```
+
+Neither call is guarded. Unplugging the RFD900x modem (or the buoy's USB cable), a driver
+reset, or a USB power glitch raises `serial.SerialException` / `OSError` out of the `after()`
+callback. Tk prints the traceback to stderr and simply does not reschedule the callback — so
+`root.after(100, self.update)` at the bottom of the method is never reached and **every** panel
+and plot freezes permanently. The window stays open and responsive-looking, which is the worst
+possible failure mode: an operator watching a frozen plot has no way to tell it from a quiet
+sea state.
+
+**Impact:** Silent, unrecoverable loss of live monitoring during a deployment. Nothing on
+screen indicates the link is gone.
+
+**Suggested resolution:** Wrap the read in `try/except`, close and `None` the port on failure,
+drive the SD/connection indicator to a visible "DISCONNECTED" state, and — critically — put the
+`root.after(100, self.update)` reschedule in a `finally` block so the loop can never die.
+
+---
+
+### Issue 45 — 🟡 Medium: `n_dropped` is since-boot while `n_samples` is per-window
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `VertiSea/VertiSea.ino`, `loop()` — the `CURRENT_STATS_WINDOW_MS` close block.
+
+When a window closes, `statCharge_mC`, `statI2t_mA2s`, `statIntegSec`, `statPeakCounts` and
+`statSamples` are all reset, but `currentDropped` is not — it is a since-boot counter. The
+`CurrentStatsPacket` field is documented as "sample ticks missed vs the requested rate", and
+the GUI shows it directly beside the per-window `n_samples`. The two quantities cover different
+time spans, so the ratio a reader naturally forms from them is meaningless, and `n_dropped`
+grows without bound over a long deployment.
+
+**Impact:** Diagnostic only — the integrals use measured `dt` and are unaffected — but it
+makes the one field intended to expose sampling health unusable for that purpose.
+
+**Suggested resolution:** Either reset `currentDropped` with the rest of the window state and
+document it as per-window, or keep it cumulative and rename the packet field (and its GUI
+label) to say so. Prefer the former: it makes `n_dropped` comparable to `n_samples`.
+
+---
+
+### Issue 46 — 🟡 Medium: the magnetometer is a fatal boot dependency but is never read
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `VertiSea/VertiSea.ino`, `setup()` and `loop()`.
+
+`setup()` halts the board forever if `mag.begin()` fails:
+
+```cpp
+if (!mag.begin()) { DBG_PRINTLN("Magnetometer failed!"); while (1); }
+```
+
+But `loop()` calls `collectIMUData_ISM(..., /*isStabilizedIMU=*/false, ...)` for **both** IMUs,
+so the `if (isStabilizedIMU)` branch that actually reads the MMC5983MA never executes. The
+magnetometer is initialised, is allowed to brick the deployment, and contributes nothing.
+
+A second consequence: with `IMU_RAW_ONLY 0`, the `TYPE_MAG` (`0x07`) record is still written
+every tick from `lastStabIMU.mx/my/mz` — which are copies of an `LPFState` that nothing ever
+updates. Those records are **constant zeros**, indistinguishable in the CSV from a real
+magnetometer reading near the calibration centre.
+
+**Impact:** An unnecessary single point of failure for the whole mission, plus a silently
+fabricated data channel in any `IMU_RAW_ONLY 0` log.
+
+**Suggested resolution:** Make the `mag.begin()` failure non-fatal (log it, set a status flag,
+continue) since nothing depends on it; and skip writing `0x07` entirely while 9-DOF is
+disabled, rather than writing zeros. If 9-DOF is re-enabled, restore both.
+
+---
+
+### Issue 47 — 🟡 Medium: every sensor init failure halts the board with no watchdog
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `VertiSea/VertiSea.ino`, `setup()` — RTC, BME280, both IMUs, magnetometer, SD, and
+the filename-exhaustion path all end in `while (1);`. `while (!imuStab.getDeviceReset());` and
+its fixed-IMU twin are unbounded spins with no timeout either.
+
+On a bench with `USB_DEBUG 1` this is reasonable: the message says which sensor failed. In a
+deployed buoy with `USB_DEBUG 0` the failure is completely invisible — the LED is left solid
+HIGH from the start of `setup()`, no telemetry is sent, no SD file is created, and the Apollo3
+watchdog is not enabled, so nothing ever retries. A transient I²C glitch at power-on costs the
+entire deployment.
+
+**Impact:** Total, silent data loss from a recoverable fault. The existing RTC retry loop shows
+the pattern is understood; it just is not applied elsewhere.
+
+**Suggested resolution:** For each sensor, retry a bounded number of times, then degrade rather
+than halt: record the failure in a boot-status packet, set a distinct LED blink code, and
+continue with whatever sensors did initialise. Reserve a true halt for "no SD card", which is
+the only failure that makes logging pointless — and even then, prefer enabling the Apollo3
+watchdog so the board reboots and retries. Add timeouts to the `getDeviceReset()` spins.
+
+---
+
+### Issue 48 — 🟡 Medium: live parser redraws three canvases per packet
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `vertisea_plot_v7.py`, `VertiSeaGUI.update()`.
+
+The `while len(self.buffer) >= 1:` drain loop calls `imu_canvas.draw()`,
+`stab_canvas.draw()` and `mech_canvas.draw()` **inside** the per-packet `0x06` branch. A
+matplotlib `draw()` costs on the order of tens of milliseconds. At 10 Hz (`USB_TELEM 1`) that
+is already ~30 full redraws per second; if the 100 ms poll ever finds several buffered packets,
+the loop performs that work once per packet before returning to Tk. Redraw time then exceeds
+the arrival interval, more packets queue up, and the backlog grows — the classic feedback loop
+that turns a responsive GUI into a frozen one.
+
+**Impact:** UI latency and stalls that worsen with link rate. Compounds Issue 44, because a
+frozen GUI and a dead GUI look identical.
+
+**Suggested resolution:** Drain the buffer and update only the deques inside the loop, then
+issue at most one `draw_idle()` per canvas per `update()` tick, after the loop. `draw_idle()`
+also lets Tk coalesce repaints.
+
+---
+
+### Issue 49 — 🟢 Low: ts10 wrap handling is not shared with the RPM stream
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `vertisea_plot_v7.py`, `VertiSeaGUI.update()`.
+
+`self._ts10_last` is only updated in the `0x06` branch, but the `0x0C` branch reuses
+`self._ts10_offset` to build its own time axis. `0x06` and `0x0C` are emitted from different
+places in `loop()` and can straddle a wrap in either order, so around each 655 s boundary the
+RPM series can be plotted a full 655.36 s away from the attitude series.
+
+**Impact:** Cosmetic — an RPM trace that jumps off the visible x-range roughly every 11 minutes.
+
+**Suggested resolution:** Factor the wrap tracking into one small helper
+(`self._monotonic_seconds(ts10)`) and call it from every branch that carries a `ts10`, so all
+streams share one wrap counter.
+
+---
+
+### Issue 50 — 🟢 Low: `connect_serial()` leaks the previously opened port
+
+**Status:** Open, found by the 2026-09-11 code review.
+
+**Where:** `vertisea_plot_v7.py`, `VertiSeaGUI.connect_serial()`.
+
+The method assigns a new `serial.Serial` to `self.ser` without closing the old one. Clicking
+**Connect** a second time leaves the first handle open and owned by a dropped object; on
+Windows the port stays locked until the process exits, so reconnecting to the same port fails
+with "access denied" and the user has to restart the program.
+
+**Suggested resolution:** `if self.ser and self.ser.is_open: self.ser.close()` before opening,
+inside its own `try/except`.
+
+---
+
+### Issue 51 — 🟢 Low: BIN-load summary omits the packet types the default build produces
+
+**Status:** Open, found by the 2026-09-11 code review. Related to Issue 38.
+
+**Where:** `vertisea_plot_v7.py`, `load_bin_file()`.
+
+The summary dialog iterates a hard-coded key list that includes `fixed_imu` and `stab_imu` but
+**not** `imu_raw`, `rtc_event`, `fixed_cal` or `stab_cal`. The committed firmware is
+`IMU_RAW_ONLY 1`, so a log from it reports no IMU records at all in the dialog even though
+`_imuRaw.csv` was written correctly. The dialog also fires a "No Buoy IMU Data" warning for
+the same reason.
+
+**Impact:** The parse summary actively misleads about the most common log type.
+
+**Suggested resolution:** Derive the summary from `data` itself — iterate the keys that have
+records, in `_schemas` order — instead of a parallel hard-coded list that has to be kept in
+sync by hand. That also fixes step 5 of the README's "adding a new packet type" checklist
+permanently.

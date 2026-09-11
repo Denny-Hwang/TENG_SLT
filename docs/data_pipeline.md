@@ -17,7 +17,7 @@
 > separate docs task.
 
 > **Status:** Stable
-> **Source file(s):** [`parse_vertisea_log_v4.m`](../parse_vertisea_log_v4.m), [`Calibration/calibrateMag.m`](../Calibration/calibrateMag.m)
+> **Source file(s):** [`Calibration/calibrateMag.m`](../Calibration/calibrateMag.m) (the SD parser now lives in [`vertisea_plot_v7.py`](../vertisea_plot_v7.py))
 > **Last reviewed:** 2026-08-18
 
 ## Purpose

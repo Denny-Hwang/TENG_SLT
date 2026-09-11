@@ -9,15 +9,16 @@
 ## What this project is
 
 VertiSea is an embedded data-acquisition and telemetry system for a wave-energy buoy
-(Arctic TENG project, PNNL). Arduino firmware (`VertiSea.ino`) on a **SparkFun RedBoard
-Artemis Nano** reads two ISM330DHCX IMUs, an MMC5983MA magnetometer, a BME280
-environmental sensor, a u-blox GNSS module, an RV8803 RTC, a supercapacitor voltage
-divider, and an optional Melexis US1881 Hall-effect rotor-RPM sensor. It applies sensor
+(Arctic TENG project, PNNL). Arduino firmware (`VertiSea/VertiSea.ino` — the sketch lives in
+a folder of the same name) on a **SparkFun RedBoard Artemis Nano** reads two ISM330DHCX IMUs,
+an MMC5983MA magnetometer, a BME280 environmental sensor, a u-blox GNSS module, an RV8803
+RTC, a harvested-current sensor on A14, a 1S LiFePO4 battery divider on A15, and an optional
+Melexis US1881 Hall-effect rotor-RPM sensor. It applies sensor
 calibration and Madgwick AHRS filtering, packs data into typed binary packets, logs them
 to an SD card over SPI, and streams a subset of packets over a pair of RFD900x 900 MHz
 radio modems at 115200 baud. On the receiving end, a Python/Tkinter ground-station script
-(`vertisea_plot_v7.py`) displays live GPS, BME280, status, supercap, RPM, and IMU data
-with rolling plots, and can also parse an SD `.BIN` log to CSV via its "Load BIN File"
+(`vertisea_plot_v7.py`) displays live GPS, BME280, status, harvested-current statistics,
+battery voltage, RPM, and IMU data with rolling plots, and can also parse an SD `.BIN` log to CSV via its "Load BIN File"
 button — this is now the **only** SD log parser. A MATLAB function (`calibrateMag.m`)
 performs ellipsoid-fit magnetometer calibration.
 
@@ -103,12 +104,14 @@ modified under this strategy.
 - SD logging uses `SD.begin(CS_SD)` (the SD 1.3.0 single-argument overload, which selects
   `SPI_HALF_SPEED` internally); CS pin is 4. Do not pass `SPI_FULL_SPEED` as a second
   argument: that overload is `(clock, csPin)`, not `(csPin, speed)`.
-- Four compile-time deployment flags gate major subsystems — read the "Deployment Flags"
-  section of `docs/firmware.md` before changing them: `USB_DEBUG`, `USB_TELEM`,
-  `GPS_ENABLE` (**must** be `0` when no GPS is attached, or a failed I²C ACK hangs the bus
-  and freezes both IMUs), and `RPM_ENABLE`. Current committed state: `USB_DEBUG 0`,
-  `USB_TELEM 1`, `GPS_ENABLE 0`, `RPM_ENABLE 1` — i.e. **USB telemetry, no GPS, RPM on**.
-  Do not assume field-radio defaults.
+- **Seven** compile-time deployment flags gate major subsystems — read the "Deployment
+  Flags" section of `docs/firmware.md` before changing them: `USB_DEBUG`, `USB_TELEM`,
+  `TELEM_ENABLE`, `GPS_ENABLE` (**must** be `0` when no GPS is attached, or a failed I²C ACK
+  hangs the bus and freezes both IMUs), `RPM_ENABLE`, `IMU_RAW_ONLY`, `SD_BUFFERED_WRITE`.
+  Committed state (verified against source 2026-09-11): `USB_DEBUG 0`, `USB_TELEM 0`,
+  **`TELEM_ENABLE 0`**, `GPS_ENABLE 0`, `RPM_ENABLE 1`, `IMU_RAW_ONLY 1`,
+  `SD_BUFFERED_WRITE 1` — i.e. an **SD-only capture build that transmits nothing**.
+  Do not assume field-radio defaults, and do not assume telemetry is on.
 - Debug output must use the `DBG_PRINT` / `DBG_PRINTLN` macros, never `Serial.print()`
   directly, so field builds compile it out entirely.
 - ADC is 14-bit (`analogReadResolution(14)`); `ADC_MAX = 16383`.
@@ -133,8 +136,10 @@ modified under this strategy.
   (`<`) always.
 - Rolling buffers use `collections.deque(maxlen=100)`.
 - The ground station parses six radio packet types: `0x03` BME, `0x04` GPS, `0x06`
-  TELEM_IMU, `0x0A` SUPERCAP, `0x0B` STATUS, and `0x0C` RPM. Supercap voltage, SD health,
-  and rotor RPM **are** displayed in the System Status panel.
+  TELEM_IMU, `0x0B` STATUS, `0x0C` RPM, `0x0F` CURRENT_STATS, and `0x14` BATTERY_VOLTAGE.
+  (`0x0A` SUPERCAP/CURRENT was retired 2026-09-03 and its radio handler removed.) SD health,
+  window-average current, battery voltage, and rotor RPM are displayed in the System Status
+  panel; the harvested-energy panel is driven entirely by `0x0F`.
 - The module also contains a standalone SD-log parser (`parse_binary_file()` and
   `write_csvs_from_parsed()`) reached via the "Load BIN File" button. Since the MATLAB
   parser was retired (2026-09-03) this is the **sole** SD log parser, so it is the single
@@ -174,15 +179,16 @@ renamed commands, changed baud rates, new packet types.
 
 ## Ignored in Git (do not create or assume these exist)
 
-Actually listed in `.gitignore`:
+Listed in the root `.gitignore` (re-synchronised 2026-09-11 — it previously listed only
+three of these, so several entries documented here were not actually ignored):
 
+- `.venv/`, `__pycache__/`, `*.pyc`, `*.pyo` — Python virtualenv and bytecode
 - `*.bak` — Arduino IDE backup files (e.g., `VertiSea.bak`)
 - `debug.txt` — ad-hoc debug capture
 - `*.pdf` — generated from the `.md` sources
-- `__pycache__/`, `*.pyc`, `*.pyo` — Python bytecode
 - `Thumbs.db`, `desktop.ini`, `.DS_Store` — OS metadata
 - `SampleData/` — deployment logs and parsed CSVs (untracked 2026-08-18; ~124 MB)
-- `.venv/` — self-ignored via `.venv/.gitignore`, not the root `.gitignore`
+- `*.BIN`, `*.bin` — raw SD captures must never be committed
 
 ## `SampleData/` — present on disk, no longer version-controlled
 

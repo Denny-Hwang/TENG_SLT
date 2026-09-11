@@ -596,12 +596,21 @@ Madgwick            filterStab;  // Madgwick AHRS for stabilized IMU
 // =============================================================================
 
 // Calibration constants for one ISM330DHCX IMU.
-// Biases are subtracted from raw counts before scaling.
-// Scales convert raw counts to physical units (accel → g, gyro → °/s).
+// Biases are subtracted, then the accel is divided by its scale, yielding g and °/s.
+//
+// UNITS: these are subtracted from / divide the values the SparkFun driver returns,
+// which are already SCALED (accel in milli-g, gyro in mdps) and are NOT raw LSB counts.
+//   accel_bias  — milli-g                (subtracted from accelData.*Data)
+//   accel_scale — milli-g per 1 g, ~1000 (divides the bias-corrected accel)
+//   gyro_bias   — MILLIDEGREES/S, not °/s (subtracted from gyroData.*Data, which is
+//                 in mdps; the ×0.001 to °/s happens AFTER the subtraction). A value
+//                 of -438.56 is -0.44 °/s, a normal zero-rate offset. Reading it as
+//                 °/s implies a sensor pegged near full scale, which is what the docs
+//                 said before 2026-09-11.
 struct IMUCal {
-  float accel_bias[3];   // accelerometer zero-g bias (mg)
-  float accel_scale[3];  // accelerometer sensitivity (counts per +1 g)
-  float gyro_bias[3];    // gyroscope zero-rate bias (°/s)
+  float accel_bias[3];   // accelerometer zero-g bias (milli-g)
+  float accel_scale[3];  // accelerometer sensitivity (milli-g per +1 g, ≈1000)
+  float gyro_bias[3];    // gyroscope zero-rate bias (MILLIDEGREES/S — see note above)
 };
 
 // Processed output from one ISM330DHCX + Madgwick filter cycle.
@@ -710,14 +719,14 @@ bool sdError = false;
 IMUCal fixedCal = {
   {   3.5f,  -25.0f,   10.0f },   // accel bias  [X, Y, Z] (mg)
   {1004.5f, 1007.0f,  999.0f },   // accel scale [X, Y, Z] (counts/g)
-  {  -2.36f, -396.8f, -192.5f }   // gyro bias   [X, Y, Z] (°/s)
+  {  -2.36f, -396.8f, -192.5f }   // gyro bias   [X, Y, Z] (mdps ≈ -0.002/-0.397/-0.193 °/s)
 };
 
 // Stabilized IMU (gimballed platform, I²C 0x6B)
 IMUCal stabCal = {
   {  -3.0f,  -15.0f,   22.5f },   // accel bias  [X, Y, Z] (mg)
   {1001.0f,  994.0f, 1003.5f },   // accel scale [X, Y, Z] (counts/g)
-  { 384.5f, -438.56f,  113.3f }   // gyro bias   [X, Y, Z] (°/s) — Y updated 2026-04-02 from 19.4 s stationary log
+  { 384.5f, -438.56f,  113.3f }   // gyro bias   [X, Y, Z] (mdps ≈ 0.385/-0.439/0.113 °/s) — Y updated 2026-04-02 from 19.4 s stationary log
 };
 
 // =============================================================================

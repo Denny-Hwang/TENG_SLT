@@ -3,6 +3,26 @@
 Newest first.
 
 ---
+## 2026-09-11 — Correct the `IMUCal` unit comments (mdps, not °/s) — `[UNCONFIRMED]`
+
+**Comment-only change; no behaviour, no packet layout, no constant values changed.**
+
+`collectIMUData_ISM()` computes `gx_dps = (gyroData.xData - cal.gyro_bias[0]) * 0.001f`. The
+subtraction happens in the driver's native mdps units, so `gyro_bias[]` is in millidegrees per
+second. The struct comment said °/s, which made the committed −438.56 read as a −438 °/s
+zero-rate bias — a sensor pegged near its ±500 °/s full scale. The same error had propagated
+into four documents and caused a real 1000× mistake in the 2026-04-02 recalibration
+(see Issue 42 and `docs/calibration.md`).
+
+Also corrected `accel_scale`'s comment from "counts per +1 g" to "milli-g per +1 g (≈1000)":
+`sfe_ism_data_t` is already scaled by the SparkFun library, so nothing in this struct operates
+on raw LSB counts. That is the same wrong assumption that produced the Issue 35 int16 gyro
+overflow, so it is worth stating once, in the struct.
+
+Added the °/s equivalents to the `fixedCal` / `stabCal` initialiser comments so the numbers are
+sanity-checkable at the point of definition.
+
+---
 ## 2026-09-10 — Enter the installed battery divider (98.7 k / 98.9 k) and correct the cell chemistry to LiFePO4 — `[UNCONFIRMED]`
 
 **Why:** The EE built and measured the A15 battery divider, replacing the 30 k / 20 k

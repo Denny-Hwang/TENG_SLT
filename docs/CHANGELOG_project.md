@@ -5,6 +5,59 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-11 — Repository review: fix broken links, correct the `gyro_bias` unit error, prune a captured log — `[UNCONFIRMED]`
+
+**Why:** a full-repository review. Three classes of problem were mechanical enough to fix
+directly; the behavioural findings were filed as Issues 41–51 instead of being changed
+blind, because they need hardware to verify.
+
+**Broken links (all docs).** The sketch lives at `VertiSea/VertiSea.ino` (Arduino requires the
+folder name to match), but every document linked it as `VertiSea.ino` or `../VertiSea.ino` —
+roughly 100 dead links across `README.md`, `AGENTS.md`, `IDENTIFIED_ISSUES.md`,
+`POTENTIAL_UPGRADES.md` and `docs/*.md`. Repointed. Also repointed the five surviving links to
+`parse_vertisea_log_v4.m`, deleted 2026-09-03, at the Python parser; two of them were inside
+live calibration procedures, so a reader following `docs/calibration.md` was being sent to a
+file that does not exist.
+
+**`gyro_bias` unit error (Issue 42).** `IMUCal.gyro_bias[]` is subtracted from the SparkFun
+driver's mdps value *before* the `* 0.001f` conversion, so it is in millidegrees/s. It was
+documented as °/s in the struct comment, `docs/firmware.md`, `docs/binary_protocol.md`,
+`docs/calibration.md` and `README.md`. `docs/calibration.md` had additionally grown a note
+justifying the resulting impossible number ("several hundred °/s ... is normal for this
+sensor"). This was not cosmetic: the calibration procedure told the operator not to multiply
+by 1000, and the 2026-04-02 recalibration consequently applied a −0.065 °/s residual as
+−0.06 mdps instead of −65 mdps, leaving the stabilized IMU's Y bias uncorrected. Corrected
+every occurrence, rewrote the procedure with the right conversion, and flagged the 2026-04-02
+history entry as wrong by 1000×. **The constant itself was not changed** — it needs a fresh
+stationary log.
+
+**Stale "current state" claims.** `docs/firmware.md` asserted `USB_TELEM 1` / `TELEM_ENABLE 1`
+"read from source 2026-09-08"; the source has both `0`. `AGENTS.md` said the same, said "four
+compile-time deployment flags" where there are seven, still listed `0x0A SUPERCAP` among the
+radio packet types the ground station parses (its handler was removed), and described a
+`.gitignore` containing seven entries the actual file did not have. All corrected against the
+source, and `.gitignore` rewritten to match what `AGENTS.md` documents — including
+`SampleData/`, which was documented as ignored since 2026-08-18 but was not in the file, and
+`*.BIN`.
+
+**Deleted:** `tools/adc_timer_dma_experiment/500Hz_stalls_swtrigger0_120s.txt` (54 kB) — a raw
+serial capture from the rejected ADC/DMA experiment. Every number in it, and the corrected
+`fifo_overruns` interpretation, is already recorded in
+`docs/CHANGELOG_tools__adc_timer_dma_experiment__adc_timer_dma_experiment.ino.md`, so the
+capture is redundant with its own analysis. Recoverable from git history at `e7827ec`.
+
+**Moved:** `Ground_RFD900x.png` → `docs/Ground_RFD900x.png`. It was an unreferenced file in the
+repository root, but it is the only record of the RFD900x configuration as flashed — which
+matters while Issue 36 (radio transport unverified) is open. Now referenced from the README
+hardware section with the settings transcribed inline.
+
+**Filed, not fixed — Issues 41–51.** Notably Issue 41: `collectIMUData_ISM()` negates accel X
+and gyro Y, presenting the two sensors to Madgwick in frames that differ by a 180° yaw
+rotation, each of them a left-handed reflection rather than a rotation. That needs the
+mechanical drawing and a rotation test to resolve correctly, so no code was touched.
+
+---
+
 ## 2026-09-09 — Add Windows launchers for both Python desktop tools — `[UNCONFIRMED]`
 
 **Status:** `[UNCONFIRMED]` — launcher dispatch and the current-filter self-test were checked

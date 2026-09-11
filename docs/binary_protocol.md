@@ -1,7 +1,7 @@
 # Binary Packet Protocol
 
 > **Status:** Stable  
-> **Source file(s):** [`VertiSea.ino`](../VertiSea.ino), [`vertisea_plot_v7.py`](../vertisea_plot_v7.py)  
+> **Source file(s):** [`VertiSea.ino`](../VertiSea/VertiSea.ino), [`vertisea_plot_v7.py`](../vertisea_plot_v7.py)  
 > **Last reviewed:** 2026-08-18
 
 ## Purpose
@@ -29,7 +29,7 @@ Every packet begins with a 5-byte header:
 | 0 | 1 | `uint8` | `type` | Packet type ID (see table below) |
 | 1 | 4 | `uint32` | `timestamp_ms` | `millis()` since boot, in milliseconds |
 
-The `writeHeader(type, t_ms)` helper in the firmware writes this header.
+The firmware writes this header inside `sdAppendRecord(type, t_ms, payload, payloadBytes)`, which is the single entry point for every SD record and the only place the header layout exists. (An older `writeHeader()` helper no longer exists.)
 
 ---
 
@@ -60,11 +60,13 @@ The `writeHeader(type, t_ms)` helper in the firmware writes this header.
 
 **Next free ID: `0x15`.**
 
-> **⚠ `0x0A` TYPE_CURRENT is scheduled for removal.** Its SD payload is a single
-> point-sample of the current sensor taken at the telemetry tick, which is a
-> *statistically biased* estimator: measured mean 682 counts versus 325 counts for
-> the full-rate `0x0E` stream (2.1× high), because a ~100 ms point sample aliases a
-> bursty signal. **Use `0x0E` for all quantitative work.** Do not average `0x0A`.
+> **⚠ `0x0A` TYPE_CURRENT was removed on 2026-09-03** — the firmware no longer emits it
+> and the ground station no longer parses it over the radio. Its SD payload was a single
+> point-sample of the current sensor taken at the telemetry tick, which is a *statistically
+> biased* estimator: measured mean 682 counts versus 325 counts for the full-rate `0x0E`
+> stream (2.1× high), because a ~100 ms point sample aliases a bursty signal. The SD read
+> path is retained so pre-2026-09-03 logs still load. **Use `0x0E` for all quantitative
+> work.** Do not average `0x0A`, and do not reuse the ID.
 
 ---
 
@@ -239,9 +241,15 @@ Header + payload (mirrors `IMUCal` struct, 9 floats):
 | 17 | 4 | `float` | `accel_scale_x` | counts per +1 g |
 | 21 | 4 | `float` | `accel_scale_y` | counts per +1 g |
 | 25 | 4 | `float` | `accel_scale_z` | counts per +1 g |
-| 29 | 4 | `float` | `gyro_bias_x` | °/s |
-| 33 | 4 | `float` | `gyro_bias_y` | °/s |
-| 37 | 4 | `float` | `gyro_bias_z` | °/s |
+| 29 | 4 | `float` | `gyro_bias_x` | millidegrees/s |
+| 33 | 4 | `float` | `gyro_bias_y` | millidegrees/s |
+| 37 | 4 | `float` | `gyro_bias_z` | millidegrees/s |
+
+> **Units.** `accel_bias` is milli-g and `accel_scale` is milli-g per g (≈1000), because
+> the SparkFun driver already scales `sfe_ism_data_t`; these are not raw LSB counts.
+> `gyro_bias` is **millidegrees per second** — it is subtracted from the driver's mdps
+> value *before* the ×0.001 conversion to °/s. Corrected 2026-09-11; these three fields
+> were previously documented as °/s, which made a normal −0.44 °/s offset read as −438 °/s.
 
 **Total packet:** 41 bytes. `TYPE_STAB_CAL` (`0x09`) has identical layout.
 

@@ -151,7 +151,7 @@ Use `queue.Queue` to pass progress updates back to the main thread.
 
 **Status:** Planned  
 **Related issues:** None (deliberate design choice, not a bug)  
-**Files affected:** [`VertiSea.ino`](VertiSea.ino)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 
 #### Motivation
 
@@ -184,7 +184,7 @@ to) vertical displacement, and update the ground station display accordingly.
 
 **Status:** ✅ Implemented
 **Related issues:** [Issue 1](IDENTIFIED_ISSUES.md#issue-1) (boot block)
-**Files affected:** [`VertiSea.ino`](VertiSea.ino)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 
 #### Motivation
 
@@ -263,7 +263,7 @@ to support the full ±70° operating range without `int16_t` overflow.
 
 **Status:** ⚠ Partially implemented — see Issue 3
 **Related issues:** [Issue 3](IDENTIFIED_ISSUES.md#issue-3)
-**Files affected:** [`VertiSea.ino`](VertiSea.ino)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 
 #### Motivation
 
@@ -284,7 +284,7 @@ Adding error detection allows the operator to know the deployment failed.
 
 **Status:** ✅ Implemented
 **Related issues:** [Issue 1](IDENTIFIED_ISSUES.md#issue-1)
-**Files affected:** [`VertiSea.ino`](VertiSea.ino)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 
 #### Motivation
 
@@ -327,7 +327,7 @@ Use `t_abs` for the x-axis. Initialise `_last_t = 0` and `_t_offset = 0.0` in
 
 **Status:** ✅ Implemented and hardware-verified 2026-09-03
 **Related issues:** None  
-**Files affected:** [`VertiSea.ino`](VertiSea.ino), [`vertisea_plot_v7.py`](vertisea_plot_v7.py), [`docs/binary_protocol.md`](docs/binary_protocol.md)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino), [`vertisea_plot_v7.py`](vertisea_plot_v7.py), [`docs/binary_protocol.md`](docs/binary_protocol.md)
 
 #### Motivation
 
@@ -395,7 +395,7 @@ and the relevant fields for each packet type.
 
 **Status:** 🔄 Completed in code 2026-09-04; hardware verification pending
 **Related issues:** [Issue 2](IDENTIFIED_ISSUES.md#issue-2)
-**Files affected:** [`VertiSea.ino`](VertiSea.ino)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino)
 
 #### Motivation
 
@@ -425,7 +425,7 @@ unused `LOGnnnnn.BIN`. Exhausting all counter names is fatal instead of permitti
 
 **Status:** ✅ Implemented
 **Related issues:** None (new feature)
-**Files affected:** [`VertiSea.ino`](VertiSea.ino), [`docs/binary_protocol.md`](docs/binary_protocol.md), [`vertisea_plot_v7.py`](vertisea_plot_v7.py)
+**Files affected:** [`VertiSea.ino`](VertiSea/VertiSea.ino), [`docs/binary_protocol.md`](docs/binary_protocol.md), [`vertisea_plot_v7.py`](vertisea_plot_v7.py)
 
 #### Motivation
 

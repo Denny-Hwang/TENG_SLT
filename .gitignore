@@ -1,3 +1,20 @@
-.venv/ 
-__pycache__/ 
-*.pyc 
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Arduino IDE
+*.bak
+
+# Generated / captured data — regenerable, never committed
+SampleData/
+*.BIN
+*.bin
+debug.txt
+*.pdf
+
+# OS metadata
+Thumbs.db
+desktop.ini
+.DS_Store

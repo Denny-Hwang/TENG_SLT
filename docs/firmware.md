@@ -1,7 +1,7 @@
 # Firmware — VertiSea.ino
 
 > **Status:** Active development
-> **Source file(s):** [`VertiSea.ino`](../VertiSea.ino)
+> **Source file(s):** [`VertiSea.ino`](../VertiSea/VertiSea.ino)
 > **Last reviewed:** 2026-08-18
 
 ## Purpose
@@ -45,19 +45,29 @@ Edit these `#define` values near the top of `VertiSea.ino` before flashing:
 | `IMU_RAW_ONLY` | `0` (processed) / `1` (raw) | `0` → log `TYPE_FIXED_IMU` + `TYPE_STAB_IMU` + `TYPE_MAG` (~119 B/tick, ~93 Hz). `1` → log one `TYPE_IMU_RAW` (`0x12`) instead (~61 B/tick, ~97.5 Hz measured). **Trade-off:** a raw log has no on-board attitude and no magnetometer record — recompute attitude offline from `0x08`/`0x09`/`0x10`. Madgwick still runs, so radio telemetry is unaffected. |
 | `SD_BUFFERED_WRITE` | `1` (buffered) / `0` (fallback) | `1` → atomically queue complete records in an eight-sector RAM buffer and service the existing synchronous Arduino SD 1.3.0 backend in 512-byte sectors. Checked writes, explicit backpressure, and queue diagnostics remain active. `0` → checked synchronous record writes without the RAM queue. Keep `1` for production. |
 
-**Committed values** (read from source 2026-09-08): `USB_DEBUG 0`, `USB_TELEM 1`,
-`TELEM_ENABLE 1`, `GPS_ENABLE 0`, `RPM_ENABLE 1`, `IMU_RAW_ONLY 1`,
+**Committed values** (re-read from source 2026-09-11): `USB_DEBUG 0`, `USB_TELEM 0`,
+**`TELEM_ENABLE 0`**, `GPS_ENABLE 0`, `RPM_ENABLE 1`, `IMU_RAW_ONLY 1`,
 `SD_BUFFERED_WRITE 1`.
 
-That is: **telemetry enabled and routed over USB, no GPS, RPM on, raw IMU records, and the
-buffered synchronous SD pipeline enabled.** With
-`USB_TELEM 1` the effective `TELEMETRY_RATE_HZ` is **10 Hz**, not 5 — the constant is chosen
-by `#if USB_TELEM` (see `VertiSea.ino` ~L387), so any doc quoting a flat "5 Hz" for `0x06`,
-`0x0C` or the other telemetry packets is only correct for a radio build.
+That is: **an SD-only capture build — no telemetry on any transport**, no GPS, RPM on, raw
+IMU records, buffered synchronous SD pipeline.
 
-> **Do not assume field-radio defaults.** This is a bench/USB configuration, set for testing.
-> A field deployment wants `USB_TELEM 0` (radio) and, for a self-contained log,
-> `IMU_RAW_ONLY 0`.
+> **⚠ This build transmits nothing.** With `TELEM_ENABLE 0` the telemetry UART is never
+> initialised and every `TELEM_WRITE()` is compiled out, so the ground station shows a blank
+> GUI regardless of which port is selected. That is the intended behaviour of this
+> configuration, not a fault — but it means the committed source is **not** the build the
+> ground-station sections of the README and `docs/telemetry_ground_station.md` describe.
+>
+> This doc previously claimed `USB_TELEM 1` / `TELEM_ENABLE 1` ("read from source
+> 2026-09-08"); the source disagrees. Re-verify the flags against the sketch rather than
+> trusting a doc snapshot.
+
+When `USB_TELEM 1` *is* set, the effective `TELEMETRY_RATE_HZ` is **10 Hz**, not 5 — the
+constant is chosen by `#if USB_TELEM`, so any doc quoting a flat "5 Hz" for `0x06`, `0x0C`
+or the other telemetry packets is only correct for a radio build.
+
+> **Do not assume field-radio defaults.** A field deployment wants `TELEM_ENABLE 1`,
+> `USB_TELEM 0` (radio) and, for a self-contained log, `IMU_RAW_ONLY 0`.
 >
 > **Transport verification status (2026-09-03):** the **USB telemetry path is confirmed
 > working** — packets reach the GUI and its panels populate. The **RFD900 radio path has not
@@ -149,7 +159,7 @@ Applied in `collectIMUData_ISM()` before LPF and Madgwick update.
 struct IMUCal {
   float accel_bias[3];   // mg — subtracted from raw accel counts
   float accel_scale[3];  // counts per +1 g — divides bias-corrected accel
-  float gyro_bias[3];    // °/s — subtracted from raw gyro (after ×0.001 mdps→dps)
+  float gyro_bias[3];    // MILLIDEGREES/S — subtracted from the driver's mdps value BEFORE the ×0.001 mdps→dps conversion
 };
 ```
 

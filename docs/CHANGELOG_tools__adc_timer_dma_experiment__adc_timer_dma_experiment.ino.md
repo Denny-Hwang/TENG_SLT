@@ -6,7 +6,9 @@ Newest first.
 
 ## 2026-09-08 — First 500 Hz hardware run with foreground stalls — `[PARTIALLY CONFIRMED 2026-09-08]`
 
-**Capture:** `500Hz_stalls_swtrigger0_120s.txt`, default 500 Hz / 120 s / 64-sample buffers,
+**Capture:** `500Hz_stalls_swtrigger0_120s.txt` (raw serial capture, removed from the tree
+2026-09-11 — every figure below is transcribed here; recoverable from git history at
+`e7827ec`), default 500 Hz / 120 s / 64-sample buffers,
 `TIMING_PROBE_ENABLE=1`, `SOFTWARE_TRIGGER_AFTER_REARM=0`, foreground stalls enabled.
 
 **What passed:** The timer produced 60,026 conversions in 120.061 s (mean interval exactly

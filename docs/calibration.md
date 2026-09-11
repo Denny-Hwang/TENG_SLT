@@ -1,7 +1,7 @@
 # Sensor Calibration — VertiSea Buoy
 
 > **Status:** Active  
-> **Source files:** [`VertiSea.ino`](../VertiSea.ino), [`Calibration/calibrateMag.m`](../Calibration/calibrateMag.m)  
+> **Source files:** [`VertiSea.ino`](../VertiSea/VertiSea.ino), [`Calibration/calibrateMag.m`](../Calibration/calibrateMag.m)  
 > **Last reviewed:** 2026-08-18
 
 ---
@@ -16,7 +16,7 @@ The VertiSea buoy carries three sensors that require offline calibration before 
 | ISM330DHCX (stabilized IMU, `0x6B`) | 6-DOF accel + gyro | Accel bias/scale, gyro bias | After physical damage or if attitude errors grow |
 | MMC5983MA (magnetometer) | 3-axis mag | Hard-iron offset, soft-iron scale | After any change to the buoy's metal/magnetic environment |
 
-Calibration constants are **hard-coded** in [`VertiSea.ino`](../VertiSea.ino) as the `fixedCal`, `stabCal`, and `magCal` structs. They are also written to the binary log at boot as `TYPE_FIXED_CAL` (0x08) and `TYPE_STAB_CAL` (0x09) packets so the parser can reconstruct physical units without a sidecar file.
+Calibration constants are **hard-coded** in [`VertiSea.ino`](../VertiSea/VertiSea.ino) as the `fixedCal`, `stabCal`, and `magCal` structs. They are also written to the binary log at boot as `TYPE_FIXED_CAL` (0x08) and `TYPE_STAB_CAL` (0x09) packets so the parser can reconstruct physical units without a sidecar file.
 
 ---
 
@@ -24,17 +24,17 @@ Calibration constants are **hard-coded** in [`VertiSea.ino`](../VertiSea.ino) as
 
 ### 1.1 What is being calibrated
 
-The `IMUCal` struct in [`VertiSea.ino`](../VertiSea.ino) holds three arrays per IMU:
+The `IMUCal` struct in [`VertiSea.ino`](../VertiSea/VertiSea.ino) holds three arrays per IMU:
 
 ```cpp
 struct IMUCal {
   float accel_bias[3];   // accelerometer zero-g bias (mg)
   float accel_scale[3];  // accelerometer sensitivity (counts per +1 g)
-  float gyro_bias[3];    // gyroscope zero-rate bias (°/s)
+  float gyro_bias[3];    // gyroscope zero-rate bias (MILLIDEGREES/S)
 };
 ```
 
-These are applied in [`collectIMUData_ISM()`](../VertiSea.ino) before the low-pass filter and Madgwick update:
+These are applied in [`collectIMUData_ISM()`](../VertiSea/VertiSea.ino) before the low-pass filter and Madgwick update:
 
 ```
 ax_g = -(raw_x - accel_bias[0]) / accel_scale[0]   ← X axis negated (body-frame convention)
@@ -65,7 +65,7 @@ The ISM330DHCX is configured at **±4 g full-scale** and **104 Hz ODR**. The raw
 
 #### Procedure
 
-1. **Set `USB_DEBUG 1`** (and `USB_TELEM 0`) in [`VertiSea.ino`](../VertiSea.ino) and flash
+1. **Set `USB_DEBUG 1`** (and `USB_TELEM 0`) in [`VertiSea.ino`](../VertiSea/VertiSea.ino) and flash
    the firmware. Do not set both flags to `1` — see the flag-combination caution in
    [`firmware.md`](firmware.md).
 
@@ -89,13 +89,13 @@ The ISM330DHCX is configured at **±4 g full-scale** and **104 Hz ODR**. The raw
 
    Where `pos_reading` is the mean raw output when +1 g is applied to axis i, and `neg_reading` is the mean when −1 g is applied.
 
-4. **Update the firmware.** Edit the `fixedCal` or `stabCal` struct in [`VertiSea.ino`](../VertiSea.ino):
+4. **Update the firmware.** Edit the `fixedCal` or `stabCal` struct in [`VertiSea.ino`](../VertiSea/VertiSea.ino):
 
    ```cpp
    IMUCal fixedCal = {
      {   3.5f,  -25.0f,   10.0f },   // accel bias  [X, Y, Z] (mg)
      {1004.5f, 1007.0f,  999.0f },   // accel scale [X, Y, Z] (counts/g)
-     {  -2.36f, -396.8f, -192.5f }   // gyro bias   [X, Y, Z] (°/s)
+     {  -2.36f, -396.8f, -192.5f }   // gyro bias   [X, Y, Z] (mdps)
    };
    ```
 
@@ -112,23 +112,37 @@ Gyroscope bias (zero-rate offset) drifts slowly with temperature. Recalibrate if
 
 1. Place the buoy on a **completely stationary** surface. Vibration from fans, HVAC, or nearby machinery will corrupt the measurement.
 
-2. Log at least **60 seconds** of data with the buoy at rest. Use [`parse_vertisea_log_v4.m`](../parse_vertisea_log_v4.m) to extract the `_imuFixed.csv` and `_imuStab.csv` files.
+2. Log at least **60 seconds** of data with the buoy at rest. Parse the `.BIN` with `vertisea_plot_v7.py` (**Load BIN File**) to extract the `_imuFixed.csv` and `_imuStab.csv` files. This requires an `IMU_RAW_ONLY 0` build; an `IMU_RAW_ONLY 1` log gives you `_imuRaw.csv` instead, whose gyro columns are already the raw **millidegrees/s** this procedure needs.
 
-3. Compute the mean of the raw gyro columns (`gx`, `gy`, `gz`) over the stationary period. These means are the zero-rate biases in °/s.
+3. Compute the mean of the gyro columns over the stationary period, then convert to the units `gyro_bias[]` actually uses.
 
-   > **Important:** The raw gyro values in the CSV are already in °/s (the firmware multiplies raw mdps counts by 0.001 before logging). The bias values in `IMUCal.gyro_bias[]` are also in °/s. Do **not** multiply by 1000.
+   > **⚠ Unit trap — corrected 2026-09-11.** `IMUCal.gyro_bias[]` is in **millidegrees per second**, not °/s. The firmware subtracts it from the driver's mdps value *before* the ×0.001 conversion:
+   >
+   > ```
+   > gx_dps = (gyroData.xData /* mdps */ - gyro_bias[0] /* mdps */) * 0.001
+   > ```
+   >
+   > The `_imuFixed` / `_imuStab` CSV columns, by contrast, are already in **°/s** and are already bias-corrected, so they carry the *residual*. To update the constant:
+   >
+   > ```
+   > gyro_bias_new[i] = gyro_bias_old[i] + mean(residual_dps[i]) * 1000
+   > ```
+   >
+   > An `_imuRaw` CSV (`IMU_RAW_ONLY 1` build) is easier: its `*_gx_mdps` columns are the uncalibrated driver output in mdps, so the mean *is* the new bias directly, with no arithmetic on the old value.
+   >
+   > This document previously said the bias was in °/s and instructed "do not multiply by 1000". Following that gives a correction 1000× too small — see the 2026-04-02 entry in the calibration history below.
 
 4. Update `gyro_bias[3]` in the appropriate `IMUCal` struct and reflash.
 
 #### Acceptance criteria
 
-After applying the new bias, the mean gyro output at rest should be < 0.05 °/s on all axes. Standard deviation should be < 0.5 °/s.
+After applying the new bias, the mean gyro output at rest should be < 0.05 °/s (< 50 mdps) on all axes. Standard deviation should be < 0.5 °/s.
 
 ---
 
 ### 1.5 Current IMU calibration values
 
-These values are hard-coded in [`VertiSea.ino`](../VertiSea.ino):
+These values are hard-coded in [`VertiSea.ino`](../VertiSea/VertiSea.ino):
 
 **Fixed IMU (hull-fixed, I²C `0x6A`)**
 
@@ -136,7 +150,7 @@ These values are hard-coded in [`VertiSea.ino`](../VertiSea.ino):
 |-----------|---|---|---|-------|
 | `accel_bias` | 3.5 | −25.0 | 10.0 | mg |
 | `accel_scale` | 1004.5 | 1007.0 | 999.0 | counts/g |
-| `gyro_bias` | −2.36 | −396.8 | −192.5 | °/s |
+| `gyro_bias` | −2.36 | −396.8 | −192.5 | mdps (= −0.002 / −0.397 / −0.193 °/s) |
 
 **Stabilized IMU (gimballed platform, I²C `0x6B`)**
 
@@ -144,9 +158,9 @@ These values are hard-coded in [`VertiSea.ino`](../VertiSea.ino):
 |-----------|---|---|---|-------|
 | `accel_bias` | −3.0 | −15.0 | 22.5 | mg |
 | `accel_scale` | 1001.0 | 994.0 | 1003.5 | counts/g |
-| `gyro_bias` | 384.5 | −438.56 | 113.3 | °/s |
+| `gyro_bias` | 384.5 | −438.56 | 113.3 | mdps (= 0.385 / −0.439 / 0.113 °/s) |
 
-> **Note:** The large gyro biases on the stabilized IMU (especially Y: −438.5 °/s) are within the ±500 °/s full-scale range of the ISM330DHCX and are normal for this sensor. They must be subtracted before the Madgwick update.
+> **Note:** These values are in **millidegrees per second**. The stabilized IMU's Y bias of −438.56 mdps is −0.44 °/s — an ordinary zero-rate offset. (This note previously read them as °/s and claimed a −438 °/s bias was "normal for this sensor"; it is not — that would be a sensor pegged near its ±500 °/s full scale.) They must be subtracted before the Madgwick update.
 
 ---
 
@@ -161,7 +175,7 @@ The MMC5983MA outputs raw 18-bit counts per axis (range 0–262143, midpoint ≈
 | **Hard-iron** | Permanent magnetic fields from nearby ferrous metal, PCB traces, or permanent magnets | Subtract a fixed offset per axis |
 | **Soft-iron** | Magnetically permeable materials that distort the field shape | Multiply by a per-axis scale factor |
 
-The `MagCal` struct in [`VertiSea.ino`](../VertiSea.ino):
+The `MagCal` struct in [`VertiSea.ino`](../VertiSea/VertiSea.ino):
 
 ```cpp
 struct MagCal {
@@ -173,7 +187,7 @@ struct MagCal {
 };
 ```
 
-Applied in [`collectIMUData_ISM()`](../VertiSea.ino):
+Applied in [`collectIMUData_ISM()`](../VertiSea/VertiSea.ino):
 
 ```cpp
 float mx = (float(mxRaw) - magCal.offset[0]) * magCal.scale[0];
@@ -201,7 +215,7 @@ Do **not** recalibrate unnecessarily — the current values are stable as long a
 - USB cable to the Artemis Nano
 - Arduino IDE or Serial Monitor
 - Open area away from large metal objects, vehicles, and power lines (≥ 5 m clearance)
-- [`parse_vertisea_log_v4.m`](../parse_vertisea_log_v4.m) to extract the mag CSV
+- `vertisea_plot_v7.py` (**Load BIN File**) to extract the mag CSV
 - MATLAB with [`Calibration/calibrateMag.m`](../Calibration/calibrateMag.m)
 
 ---
@@ -210,7 +224,7 @@ Do **not** recalibrate unnecessarily — the current values are stable as long a
 
 The magnetometer is currently **disabled** in the main loop. Before collecting calibration data, enable it:
 
-1. Open [`VertiSea.ino`](../VertiSea.ino).
+1. Open [`VertiSea.ino`](../VertiSea/VertiSea.ino).
 
 2. Find the two `collectIMUData_ISM` calls in `loop()`:
 
@@ -259,10 +273,10 @@ The ellipsoid-fit algorithm requires the magnetometer to sample all orientations
 
 ### 2.6 Step 3 — Extract the magnetometer CSV
 
-Use [`parse_vertisea_log_v4.m`](../parse_vertisea_log_v4.m) to parse the binary log:
+Parse the binary log with the Python ground station:
 
-```matlab
-parse_vertisea_log_v4('MMDDHHMM.BIN');
+```
+python vertisea_plot_v7.py     # then click "Load BIN File"
 ```
 
 This produces `MMDDHHMM_mag.csv` with columns:
@@ -330,7 +344,7 @@ If the calibrated std is > 0.10, the data coverage was insufficient. Repeat the 
 
 1. Copy the C struct block printed by the script.
 
-2. Open [`VertiSea.ino`](../VertiSea.ino) and find the `MagCal` block (around line 265):
+2. Open [`VertiSea.ino`](../VertiSea/VertiSea.ino) and find the `MagCal` block (around line 265):
 
    ```cpp
    } magCal = {
@@ -389,7 +403,7 @@ Keep a record of when calibrations were performed and what changed.
 |------|--------|--------|--------------|-------|
 | 2025-05-30 | MMC5983MA | Initial deployment | PNNL team | Full-sphere sweep, 2847 valid samples |
 | 2025-05-30 | ISM330DHCX (both) | Initial deployment | PNNL team | Six-position accel + 60 s gyro bias |
-| 2026-04-02 | ISM330DHCX (both) | Pre-deployment recalibration | PNNL team | Six-position accel (both IMUs updated); gyro bias from 19.4 s stationary log (04021311.BIN). Fixed IMU gyro within spec — no change. Stab IMU gy updated −438.5 → −438.56 °/s (residual was −0.065 °/s, just over 0.05 threshold). |
+| 2026-04-02 | ISM330DHCX (both) | Pre-deployment recalibration | PNNL team | Six-position accel (both IMUs updated); gyro bias from 19.4 s stationary log (04021311.BIN). Fixed IMU gyro within spec — no change. Stab IMU gy updated −438.5 → −438.56 (residual was −0.065 °/s, just over the 0.05 °/s threshold). **⚠ This correction is wrong by 1000×:** −0.065 °/s is −65 mdps, so the constant should have become ≈ −503.5 mdps, not −438.56. The 2026-04-02 stab-IMU Y bias is therefore effectively unchanged and the residual remains. Re-derive it before the next deployment. |
 
 ---
 
@@ -423,7 +437,7 @@ The point cloud does not cover the full sphere. Repeat the sweep, paying attenti
 
 ### Large gyro bias values
 
-The ISM330DHCX gyro bias can be several hundred °/s at room temperature. This is normal. The bias is subtracted in firmware before the Madgwick update. If the bias changes significantly between sessions, recalibrate the gyro.
+The ISM330DHCX gyro bias can be several hundred **millidegrees/s** (a few tenths of a °/s) at room temperature. This is normal. The constants in `IMUCal.gyro_bias[]` are stored in mdps, which is why they look like large numbers. The bias is subtracted in firmware before the Madgwick update. If it changes significantly between sessions, recalibrate the gyro.
 
 ---
 
