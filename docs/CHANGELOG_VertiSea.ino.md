@@ -4,6 +4,28 @@ Newest first.
 
 ---
 
+## 2026-09-11 — USB_DEBUG line printed counters the health block had just zeroed — `[UNCONFIRMED]`
+
+Field output showed `maxWriteUs=0` on every 1 Hz debug line, which is exactly the number
+someone reads that line to see.
+
+Cause: both the health-record block and the `USB_DEBUG` print fire at 1 Hz, and the health
+block runs **earlier in `loop()`**. It resets `sdServiceMaxUs` and `loopMaxUs` after writing
+the record, so by the time the debug print reads them they are always 0. Introduced with the
+health record earlier today.
+
+The reported values are now stashed in `reportedWriteMaxUs` / `reportedLoopMaxUs` before the
+reset, so the console line and the SD record show the same figures instead of the console
+showing zeros.
+
+Also added `loopUs=` to the debug line. Nominal is ~2700 us; a much larger value means
+`loop()` is not achieving its rate, which starves every gate inside it — the failure mode
+seen on core 2.x, where the achieved logging rate was ~300 B/s against an expected
+~5700 B/s (about 5.6 IMU samples/s instead of ~93). Without that column the only way to
+notice was to reverse-engineer it from the `SDq=` growth rate by hand.
+
+---
+
 ## 2026-09-11 — Refuse to build on Apollo3 core 2.x (mbed): `micros()` in the Hall ISR panics the kernel — `[CONFIRMED 2026-09-11]`
 
 **Status:** `[CONFIRMED 2026-09-11]` — reproduced on hardware; the MbedOS panic was

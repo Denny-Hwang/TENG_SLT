@@ -1333,6 +1333,14 @@ uint32_t loopMaxUs      = 0;
 uint32_t lastLoopEntryUs = 0;
 unsigned long lastHealthMs = 0;
 
+// Snapshot of what the last health record actually reported. The health block resets the
+// per-interval maxima, and it runs BEFORE the 1 Hz USB_DEBUG print later in loop() — so
+// the debug line read values that had just been zeroed and always printed maxWriteUs=0,
+// which is precisely the number someone reads that line to see. Stashing the reported
+// values keeps the console line and the SD record showing the same thing.
+uint32_t reportedLoopMaxUs  = 0;
+uint32_t reportedWriteMaxUs = 0;
+
 // TYPE_STATUS (0x0B) — 1 Hz system health packet (radio only, not logged to SD)
 // flags byte bit definitions:
 //   bit 0 : sdError  — 0 = SD logging OK, 1 = SD write failure detected
@@ -2832,8 +2840,12 @@ void loop() {
       sdAppendRecord(TYPE_SYS_HEALTH, nowMs, health);
     }
     // Per-interval maxima reset every second so one bad pass cannot be averaged away.
+    // Stash them first: the USB_DEBUG line below runs later in the same pass and would
+    // otherwise print the freshly zeroed values.
+    reportedLoopMaxUs  = loopMaxUs;
     loopMaxUs = 0;
 #if SD_BUFFERED_WRITE
+    reportedWriteMaxUs = sdServiceMaxUs;
     sdServiceMaxUs = 0;
 #endif
   }
@@ -2852,9 +2864,14 @@ void loop() {
   if (nowMs - lastDebugTime >= DEBUG_INTERVAL_MS) {
     lastDebugTime = nowMs;
 #if SD_BUFFERED_WRITE
+    // loopUs is the headline number when logging looks slow: nominal is ~2700 us, and
+    // anything far above that means loop() is not achieving its rate, which starves every
+    // gate inside it. maxWriteUs and loopUs are the values the last health record carried,
+    // not live counters — see reportedLoopMaxUs.
     DBG_PRINT("SDq="); DBG_PRINT(sdQueueUsed + sdProducerUsed);
     DBG_PRINT("B high="); DBG_PRINT(sdQueueHighWater);
-    DBG_PRINT(" maxWriteUs="); DBG_PRINT(sdServiceMaxUs);
+    DBG_PRINT(" loopUs="); DBG_PRINT(reportedLoopMaxUs);
+    DBG_PRINT(" maxWriteUs="); DBG_PRINT(reportedWriteMaxUs);
     DBG_PRINT(" overruns="); DBG_PRINTLN(sdQueueOverruns);
 #endif
   }
