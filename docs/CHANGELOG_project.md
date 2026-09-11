@@ -10,7 +10,8 @@ per-source-file changelogs. Newest first.
 **Why:** the host-side Python setup was three words of prose (`pip install pyserial
 matplotlib`) with no pinned interpreter and no record of what the code actually needs.
 
-`environment.yml` (conda-forge, `name: vertisea`) pins Python 3.11 and lists the real
+`environment.yml` (conda-forge, `name: TENG_SLT` — matching the repository, so
+`conda env list` lines up with the checkout) pins Python 3.11 and lists the real
 dependency set, which is short on purpose: `pyserial`, `matplotlib-base`, `tk`, plus
 `pytest`/`pyflakes` as optional conveniences. Two choices worth stating:
 

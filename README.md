@@ -155,7 +155,7 @@ Conda (reproducible, recommended):
 
 ```
 conda env create -f environment.yml
-conda activate vertisea
+conda activate TENG_SLT
 ```
 
 Or with pip into any Python 3.8+:

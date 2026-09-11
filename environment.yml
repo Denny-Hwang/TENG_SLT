@@ -1,7 +1,7 @@
 # Conda environment for the VertiSea host-side tools.
 #
 #   conda env create -f environment.yml
-#   conda activate vertisea
+#   conda activate TENG_SLT
 #
 # This covers ONLY the Python side — the ground station, the SD log parser, the
 # harvested-current bench and the tests. The firmware is built by the Arduino IDE with the
@@ -16,7 +16,8 @@
 #
 # Only the GUI needs pyserial/matplotlib, and only `--plot` in current_filter_test.py needs
 # matplotlib. Keep it that way when adding code.
-name: vertisea
+# Named after the repository, so `conda env list` lines up with the checkout.
+name: TENG_SLT
 
 channels:
   - conda-forge
