@@ -65,12 +65,15 @@ program (**Load BIN File**). That is the only maintained parser.
 |------|------------|
 | `VertiSea/VertiSea.ino` | Buoy firmware (Arduino sketch — **the folder name must match the sketch name**) |
 | `Madgwick/` | Vendored AHRS library; takes precedence over any global Arduino install |
-| `vertisea_plot_v7.py` | Ground station GUI **and** the SD `.BIN` → CSV parser |
-| `vertisea_plot_v7.bat` | Windows launcher for the above |
+| `vertisea_protocol.py` | Packet layouts, SD `.BIN` parser and CSV export. **Stdlib only** — no GUI, no serial. Also a batch CLI |
+| `vertisea_plot_v7.py` | Ground station GUI. Imports the parser from `vertisea_protocol.py` |
+| `vertisea_plot_v7.bat` | Windows launcher for the GUI |
+| `tests/` | Round-trip tests for the binary protocol (stdlib `unittest`) |
 | `current_filter_test.py` | Standalone bench for harvested-current post-processing (see §8) |
 | `current_filter_test.bat` | Windows launcher for the above |
 | `Calibration/` | `calibrateMag.m`, the calibration workbook, and raw accel measurements |
 | `tools/` | Throwaway benchmark sketches (SD write paths, ADC timer/DMA). Not part of the deployed system |
+| `archived/` | Superseded material kept for the record only — nothing here is read by any build step. See [`archived/README.md`](archived/README.md) |
 | `docs/` | Reference documentation and per-file changelogs |
 
 ---
@@ -207,8 +210,10 @@ Only needed for `Calibration/calibrateMag.m` (R2019b or later, no toolboxes).
 6. Click **Upload**.
 
 **At boot**, the firmware:
-- Initialises every sensor. **Any sensor failure halts the board permanently** (`while(1)`),
-  with the LED left on solid — see §11.
+- Initialises every sensor. A magnetometer failure is tolerated (nothing reads it in the
+  6-DOF configuration). Any **other** sensor failure still halts the board permanently,
+  now blinking a diagnostic pulse count on the LED: 1 = RTC, 2 = BME280, 3 = stabilized
+  IMU, 4 = fixed IMU, 5 = SD card, 6 = log filenames exhausted, 7 = log file open failed.
 - Attempts GPS time sync for up to 120 s when `GPS_ENABLE 1`; skipped entirely when `0`.
   The RTC retains time from the previous power cycle if GPS is unavailable.
 - Creates a log file `MMDDHHMM.BIN` on the SD card. If that name already exists, or the RTC
@@ -270,20 +275,29 @@ minute at the start of logging) or `LOGnnnnn.BIN` if the RTC was invalid.
 
 ### Step 2 — Parse the binary log
 
+Either through the GUI:
+
 ```
 python vertisea_plot_v7.py
 ```
 
-Click **Load BIN File** and select the `.BIN`. No serial connection is needed — the parser
-is independent of the live link. CSVs are written **next to the selected `.BIN`**, named
-`<baseName>_<type>.csv` (for example `09031435_imuRaw.csv`).
+Click **Load BIN File** and select the `.BIN`. No serial connection is needed. A summary
+dialog reports record counts per type and lists the files written.
 
-A summary dialog reports record counts per type and lists the files written.
+Or from the command line, with no GUI and no third-party packages at all:
+
+```
+python vertisea_protocol.py 09031435.BIN            # one log
+python vertisea_protocol.py /data/*.BIN             # or a whole directory
+```
+
+Either way, CSVs are written **next to the `.BIN`**, named `<baseName>_<type>.csv`
+(for example `09031435_imuRaw.csv`).
 
 > Only the packet types actually present in the log produce a CSV. A log from an
 > `IMU_RAW_ONLY 1` build contains `_imuRaw` and **no** `_imuFixed` / `_imuStab` / `_mag`.
-> The GUI's attitude plots stay empty for such a log, and it pops a "No Buoy IMU Data"
-> notice — expected, not an error (tracked as Issue 38).
+> The GUI's attitude plots stay empty for such a log and the summary says so — expected,
+> not an error.
 
 > Large logs are slow. The parser expands every high-rate current sample into a Python
 > object and runs on the GUI thread, so a multi-hour capture can consume gigabytes and
@@ -396,13 +410,13 @@ to SD and therefore never appear as CSVs.
 | Ground station shows nothing at all | Check `TELEM_ENABLE` — the committed build is `0` and transmits nothing. Also confirm `USB_DEBUG` and `USB_TELEM` are not both `1` |
 | Firmware upload fails | Verify the SparkFun Apollo3 boards package is installed and **RedBoard Artemis Nano** is selected |
 | Sketch will not open | The sketch must live in a folder of the same name: `VertiSea/VertiSea.ino` |
-| Board appears dead at boot | Any sensor `begin()` failure halts in `while(1)` with the LED solid on. There is no watchdog. Flash with `USB_DEBUG 1` to see which sensor failed |
+| Board appears dead at boot | Count the LED pulses: 1 = RTC, 2 = BME280, 3 = stab IMU, 4 = fixed IMU, 5 = SD, 6 = filenames exhausted, 7 = file open. A steady 1 Hz blink means it is running normally; 4 Hz means a latched SD error. There is still no watchdog — a halted board stays halted (Issue 47) |
 | SD card not detected | CS pin is 4; the card must be FAT32 |
 | GPS time sync skipped | `GPS_SYNC_TIMEOUT_MS = 120 000 ms` when `GPS_ENABLE 1`; `GPS_ENABLE 0` skips it entirely |
 | GPS shows no fix during deployment | Expected — the antenna sits at water level on a rocking buoy. GPS exists to set the RTC, not for positioning; logging is unaffected |
 | Running with `GPS_ENABLE 0` | The RTC coin cell is then the **only** time source. Check it before deployment and re-sync on the bench with `GPS_ENABLE 1` where reception is good |
 | No `_imuFixed`/`_imuStab` CSV after parsing | The build was `IMU_RAW_ONLY 1`. Use `_imuRaw` and recompute attitude offline |
-| `_mag` CSV is missing or all zeros | 9-DOF fusion is disabled, so the magnetometer is never read. Re-enable it (§13) before expecting magnetometer data |
+| `_mag` CSV is missing | 9-DOF fusion is disabled (`STAB_IMU_USES_MAG 0`), so no `0x07` records are written at all. Re-enable it (§13) before expecting magnetometer data. Logs from before 2026-09-11 contain `_mag` columns of constant zeros instead — those are not real readings |
 | Gyro columns look 1000× too large | `_imuRaw` gyro is in **millidegrees/s**; `_imuFixed` gyro is in °/s. The `gyro_bias` constants are in millidegrees/s too |
 | Parser stops early | An unknown packet type was hit — check that the parser version matches the firmware version |
 | Parsing a long log seems to hang | Known limitation (Issue 40): the parser is in-memory and runs on the GUI thread |
@@ -437,7 +451,8 @@ py -3 current_filter_test.py <base>_currentFast.csv
 ### Project documentation structure
 
 This project uses the AI-agent documentation strategy described in
-[`AI_Agent_Project_Documentation_Guide.md`](AI_Agent_Project_Documentation_Guide.md).
+[`archived/AI_Agent_Project_Documentation_Guide.md`](archived/AI_Agent_Project_Documentation_Guide.md)
+(archived — it is a general-purpose methodology document, not VertiSea-specific).
 All AI agent project instructions live in a single agent-agnostic file,
 [`AGENTS.md`](AGENTS.md); tool-specific files are thin loaders that point to it.
 
@@ -480,19 +495,31 @@ A round-trip test proves the *transport* is right but not that the chosen types 
 values — an `int16` gyro field passed such a test and still overflowed on hardware (Issue 35).
 Check a real log against physical expectations too.
 
-> There is currently **no automated test** covering `parse_binary_file()`. The only executable
-> test in the repository is `current_filter_test.py --selftest`, which does not touch the
-> production parser.
+Run the protocol tests after any packet change:
+
+```
+python3 tests/test_binary_protocol.py        # 24 round-trip tests, stdlib only
+python3 current_filter_test.py --selftest    # 18 checks on the current-filter bench
+```
+
+The protocol tests build `.BIN` byte streams from the layouts in `docs/binary_protocol.md`
+and assert the parser returns the values unchanged. They pin the parser against the
+protocol document — they do **not** compile the firmware, so a change made to
+`VertiSea.ino` alone will not fail them.
 
 ### Re-enabling 9-DOF magnetometer fusion
 
-In `loop()`, change the stabilized-IMU call's `isStabilizedIMU` argument from `false` to `true`:
+Set the single flag near the top of `VertiSea/VertiSea.ino`:
 ```cpp
-lastStabIMU = collectIMUData_ISM(imuStab, filterStab, stabCal, true, lpfStab, dtActual);
+#define STAB_IMU_USES_MAG 1
 ```
-That enables magnetometer reading, calibration, LPF, and the 9-DOF Madgwick `update()`.
-`heading` then becomes valid instead of 999.9. It also requires `IMU_RAW_ONLY 0` for the
-magnetometer to reach the log at all.
+That enables magnetometer reading, calibration, LPF, the 9-DOF Madgwick `update()`, and
+the `TYPE_MAG` (`0x07`) SD record — all from one place. `heading` then becomes valid
+instead of 999.9. Reaching the log also requires `IMU_RAW_ONLY 0`.
+
+Verify the fix for Issue 41 first: the accelerometer and gyroscope are currently presented
+to the filter in two different body frames, and adding a third sensor to that fusion will
+not help.
 
 ### Sample data
 

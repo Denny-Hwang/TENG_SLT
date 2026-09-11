@@ -4,7 +4,10 @@
 > (`.roo/rules.md`, `.github/copilot-instructions.md`) point here. Update this file
 > only; do not fork project rules into loader files.
 >
-> Documentation strategy: [`AI_Agent_Project_Documentation_Guide.md`](AI_Agent_Project_Documentation_Guide.md).
+> Documentation strategy: [`archived/AI_Agent_Project_Documentation_Guide.md`](archived/AI_Agent_Project_Documentation_Guide.md)
+> (archived 2026-09-11 — it is a reusable, project-agnostic guide, not VertiSea content).
+> `archived/` holds superseded material only; never put live documentation there, and never
+> treat anything in it as current design intent.
 
 ## What this project is
 
@@ -140,10 +143,17 @@ modified under this strategy.
   (`0x0A` SUPERCAP/CURRENT was retired 2026-09-03 and its radio handler removed.) SD health,
   window-average current, battery voltage, and rotor RPM are displayed in the System Status
   panel; the harvested-energy panel is driven entirely by `0x0F`.
-- The module also contains a standalone SD-log parser (`parse_binary_file()` and
-  `write_csvs_from_parsed()`) reached via the "Load BIN File" button. Since the MATLAB
-  parser was retired (2026-09-03) this is the **sole** SD log parser, so it is the single
-  place a packet change must be reflected on the read side.
+- **The parser lives in `vertisea_protocol.py`, not in the GUI module** (split
+  2026-09-11). That module is stdlib-only — no `tkinter`, no `matplotlib`, no `pyserial` —
+  so the parser can be imported, tested and scripted headlessly, and so a packet change has
+  exactly ONE place to be reflected on the read side. `vertisea_plot_v7.py` imports from
+  it and must not redefine any packet constant or layout.
+- `vertisea_protocol.py` also runs as a batch CLI:
+  `python3 vertisea_protocol.py LOG00001.BIN [...]` writes the CSVs with no GUI.
+- **Run `python3 tests/test_binary_protocol.py` after any packet change.** It builds `.BIN`
+  byte streams from `docs/binary_protocol.md` and asserts the parser returns them unchanged.
+  It pins the parser against the protocol doc; it does not compile the firmware, so it
+  cannot catch a change made to `VertiSea.ino` alone.
 
 ### MATLAB
 - **`parse_vertisea_log_v4.m` was retired 2026-09-03** — see the note at the top of this

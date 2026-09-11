@@ -1,7 +1,13 @@
 # Telemetry Ground Station — vertisea_plot_v7.py
 
 > **Status:** Active development
-> **Source file(s):** [`vertisea_plot_v7.py`](../vertisea_plot_v7.py)
+> **Source file(s):** [`vertisea_plot_v7.py`](../vertisea_plot_v7.py) (GUI),
+> [`vertisea_protocol.py`](../vertisea_protocol.py) (packet layouts, SD parser, CSV export)
+>
+> **Split 2026-09-11:** the parser moved out of the GUI module so it could be imported and
+> tested without `tkinter`/`matplotlib`/`pyserial`, and so packet layouts have one home.
+> Sections below describing `parse_binary_file()` / `write_csvs_from_parsed()` now refer to
+> `vertisea_protocol.py`, which also runs as a batch CLI.
 > **Last reviewed:** 2026-08-18
 
 ## Purpose

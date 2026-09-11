@@ -1,7 +1,9 @@
 # Binary Packet Protocol
 
 > **Status:** Stable  
-> **Source file(s):** [`VertiSea.ino`](../VertiSea/VertiSea.ino), [`vertisea_plot_v7.py`](../vertisea_plot_v7.py)  
+> **Source file(s):** [`VertiSea.ino`](../VertiSea/VertiSea.ino) (write side),
+> [`vertisea_protocol.py`](../vertisea_protocol.py) (read side),
+> [`tests/test_binary_protocol.py`](../tests/test_binary_protocol.py) (round-trip tests)  
 > **Last reviewed:** 2026-08-18
 
 ## Purpose
@@ -9,8 +11,10 @@
 This document is the **single source of truth** for the binary packet format used by
 VertiSea. It defines every packet type written to the SD card and/or transmitted over
 the RFD900x radio link. Any change to a packet layout **must** be reflected here, in
-`VertiSea.ino`, and in `vertisea_plot_v7.py` simultaneously. (A second MATLAB parser was
-retired 2026-09-03; `vertisea_plot_v7.py` is now the only reader.)
+`VertiSea/VertiSea.ino`, and in `vertisea_protocol.py` simultaneously, and
+`tests/test_binary_protocol.py` must be extended to cover it. (A second MATLAB parser was
+retired 2026-09-03; `vertisea_protocol.py` is now the only reader — it was split out of
+`vertisea_plot_v7.py` on 2026-09-11 so it could be tested without a GUI.)
 
 The protocol is **frameless** — there is no sync byte or framing wrapper. Packets are
 identified by their leading type byte. The ground-station Python script handles
@@ -43,7 +47,7 @@ The firmware writes this header inside `sdAppendRecord(type, t_ms, payload, payl
 | `0x04` | `TYPE_GPS` | ✓ | ✓ (5 s) | 1 Hz log / 5 s telem |
 | `0x05` | `TYPE_RTC_EVENT` | ✓ | ✗ | Once at boot |
 | `0x06` | `TYPE_TELEM_IMU` | ✗ | ✓ (5 Hz) | 5 Hz telem only |
-| `0x07` | `TYPE_MAG` | ✓ | ✗ | ~93 Hz; **absent when `IMU_RAW_ONLY=1`** |
+| `0x07` | `TYPE_MAG` | ✓ | ✗ | ~93 Hz; **absent when `IMU_RAW_ONLY=1` or `STAB_IMU_USES_MAG=0`** |
 | `0x08` | `TYPE_FIXED_CAL` | ✓ | ✗ | Once at boot |
 | `0x09` | `TYPE_STAB_CAL` | ✓ | ✗ | Once at boot |
 | `0x0A` | ~~`TYPE_CURRENT`~~ | ✗ | ✗ | **RETIRED 2026-09-03** — legacy logs only |

@@ -246,6 +246,19 @@
 // and rejected for Apollo3 core 1.2.1 after no prototype passed byte verification.
 #define SD_BUFFERED_WRITE 1
 
+// STAB_IMU_USES_MAG: run the stabilized IMU's Madgwick filter in 9-DOF (accel + gyro +
+// magnetometer) instead of 6-DOF. Currently 0 — heading is reported as the 999.9 sentinel
+// and no TYPE_MAG (0x07) records are written.
+//
+// This exists so the 9-DOF decision lives in ONE place. It was previously a bare `false`
+// literal passed to collectIMUData_ISM() at the call site, with the magnetometer's SD
+// record gated by nothing at all, which is how 0x07 came to log constant zeros while the
+// sensor went unread (Issue 46).
+//
+// Setting this to 1 enables magnetometer reading, calibration, the LPF, and the 9-DOF
+// Madgwick update()... but note that a log only contains 0x07 when IMU_RAW_ONLY is also 0.
+#define STAB_IMU_USES_MAG 0
+
 // HALL_PIN: digital GPIO connected to the US1881 output (open-collector, active-LOW).
 // The pin must support attachInterrupt() on the Artemis Nano (any free digital GPIO).
 // Wire: sensor pin 3 → HALL_PIN with 4.7 kΩ pull-up to 3.3 V.
@@ -493,8 +506,8 @@ const int DEBUG_RATE_HZ     =   1;  // USB debug print rate (when USB_DEBUG=1)
 //     experiment is recorded in docs/CHANGELOG_VertiSea.ino.md.
 //
 // Consequence to be aware of: because this is an over-request, the dropped-sample
-// counter reports a large number (~600/s) representing the request/reality gap,
-// NOT data loss. The integrals are unaffected — they use measured intervals. Judge
+// counter reports a large number (~600/s of window) representing the request/reality
+// gap, NOT data loss. The integrals are unaffected — they use measured intervals. Judge
 // sampling health from the effective rate (span_ms in TYPE_CURRENT_BLOCK, or
 // n_samples/window_s in TYPE_CURRENT_STATS) rather than from n_dropped.
 //
@@ -683,7 +696,7 @@ double   statIntegSec   = 0.0;   // Σ dt_s — true integration time for this w
 uint16_t statPeakCounts = 0;     // peak raw count seen in this window
 uint32_t statSamples    = 0;     // samples accumulated in this window
 uint32_t statWindowStartMs = 0;  // millis() when this window began
-uint32_t currentDropped = 0;     // sample ticks missed since boot (diagnostic)
+uint32_t currentDropped = 0;     // sample ticks missed in THIS window (diagnostic)
 
 // =============================================================================
 //  BUFFERED SD PIPELINE STATE
@@ -711,6 +724,11 @@ uint32_t sdServiceMaxUs = 0;
 //   • The LED heartbeat switches to a rapid 4 Hz error flash
 //   • Radio telemetry continues unaffected (sensor data is still valid)
 bool sdError = false;
+
+// Magnetometer presence. Set in setup(); false means mag.begin() failed. Nothing in the
+// 6-DOF configuration reads the device, so a failure is reported and tolerated rather
+// than fatal — see Issue 46 and the init block in setup().
+bool magPresent = false;
 
 // =============================================================================
 //  IMU CALIBRATION VALUES  (measured offline; update after each recalibration)
@@ -1077,9 +1095,14 @@ struct __attribute__((packed)) LpfCal {
 //                  measure; dividing by integ_s excludes unmeasured time.
 //   n_samples    — how many samples actually contributed, so the ground station
 //                  can tell a full window from a partial or degraded one
-//   n_dropped    — sample ticks missed against the requested rate. Non-zero just
-//                  means the requested rate is not being achieved; it does NOT
-//                  mean the integrals are wrong, because dt is measured.
+//   n_dropped    — sample ticks missed against the requested rate IN THIS WINDOW.
+//                  Non-zero just means the requested rate is not being achieved; it
+//                  does NOT mean the integrals are wrong, because dt is measured.
+//                  Reset with the rest of the window state so it stays comparable to
+//                  n_samples. It was previously cumulative since boot while n_samples
+//                  was per-window, so the ratio a reader naturally forms from the pair
+//                  was meaningless and the value grew without bound over a deployment
+//                  (Issue 45).
 //
 // NOTE ON "ENERGY": this packet intentionally remains current-only. The new 1 Hz
 // A15 battery channel supplies voltage separately as TYPE_BATTERY_VOLTAGE (0x14),
@@ -1095,7 +1118,7 @@ struct __attribute__((packed)) CurrentStatsPacket {
   float    i2t_mA2s;         // ∫I² dt over the window (mA²·s)
   float    integ_s;          // true integration time Σdt covered (s)
   uint32_t n_samples;        // samples that contributed to this window
-  uint32_t n_dropped;        // sample ticks missed vs the requested rate
+  uint32_t n_dropped;        // sample ticks missed vs the requested rate, THIS window
 };
 
 // TYPE_STATUS (0x0B) — 1 Hz system health packet (radio only, not logged to SD)
@@ -1326,6 +1349,52 @@ void hallISR() {
 }
 #endif  // RPM_ENABLE
 
+// Halt permanently, blinking a diagnostic code on the LED.
+//
+// Every fatal path in setup() used to be a bare `while (1);`. In a field build
+// (USB_DEBUG 0) the DBG_PRINTLN above it compiles to nothing, the LED is still solid HIGH
+// from the start of setup(), and no port is initialised — so a dead buoy is completely
+// silent about WHY it is dead, and the fault cannot be diagnosed without reflashing a
+// debug build (Issue 47). Blinking `code` short pulses, then a long pause, costs nothing
+// and lets an operator read the failure off the board:
+//
+//   1 = RTC        2 = BME280      3 = stabilized IMU   4 = fixed IMU
+//   5 = SD card    6 = log filenames exhausted          7 = log file open failed
+//
+// This still HALTS. Whether a missing BME280 should really end the mission, or whether
+// the firmware should log what it can and set a status flag, is a deployment-policy
+// decision that has not been made — see Issue 47. This only makes the current policy
+// observable.
+static void haltWithBlinkCode(uint8_t code) {
+  pinMode(LED_PIN, OUTPUT);
+  for (;;) {
+    for (uint8_t i = 0; i < code; i++) {
+      digitalWrite(LED_PIN, HIGH); delay(200);
+      digitalWrite(LED_PIN, LOW);  delay(200);
+    }
+    delay(1200);   // long gap so the pulse count is unambiguous
+  }
+}
+
+// Wait for an ISM330DHCX soft reset to complete, with a timeout.
+//
+// `while (!imu.getDeviceReset());` is an unbounded spin on an I2C read: if the device
+// NAKs or the bus is wedged, the firmware hangs here forever with the LED solid on and
+// nothing on any port to say why (Issue 47). The datasheet reset completes in well under
+// a millisecond, so 500 ms is generous. Returns false on timeout; the caller decides.
+static bool waitForDeviceReset(SparkFun_ISM330DHCX &imu, const char* name) {
+  const unsigned long t0 = millis();
+  while (!imu.getDeviceReset()) {
+    if (millis() - t0 > 500UL) {
+      DBG_PRINT("WARNING: ");
+      DBG_PRINT(name);
+      DBG_PRINTLN(" reset did not complete within 500 ms; continuing anyway.");
+      return false;
+    }
+  }
+  return true;
+}
+
 // =============================================================================
 //  setup()
 // =============================================================================
@@ -1434,7 +1503,7 @@ void setup() {
     }
     if (!rtcOk) {
       DBG_PRINTLN("RTC failed after 5 attempts!");
-      while (1);  // fatal — RTC is required for log filenames
+      haltWithBlinkCode(1);  // fatal — RTC is required for log filenames
     }
   }
   // Force 24-hour mode immediately after init. The RV8803 defaults to 12-hour
@@ -1451,7 +1520,7 @@ void setup() {
   DBG_PRINTLN("*Initializing BME280...");
   if (!bme.beginI2C()) {
     DBG_PRINTLN("BME280 failed!");
-    while (1);  // fatal — environmental sensor required
+    haltWithBlinkCode(2);  // fatal — environmental sensor required
   }
   DBG_PRINTLN("BME280 OK");
 
@@ -1459,7 +1528,7 @@ void setup() {
   DBG_PRINTLN("*Initializing stabilized IMU...");
   if (!imuStab.begin(0x6B)) {
     DBG_PRINTLN("Stabilized IMU failed!");
-    while (1);
+    haltWithBlinkCode(3);
   }
   // TODO: Review Madgwick beta gain before next deployment.
   //   Current value: betaDef = 0.5f  (Madgwick/src/MadgwickAHRS.cpp, line 30)
@@ -1477,7 +1546,7 @@ void setup() {
 
   // Soft-reset the ISM330DHCX and wait for it to complete before configuring
   imuStab.deviceReset();
-  while (!imuStab.getDeviceReset());
+  waitForDeviceReset(imuStab, "stabilized IMU");
   delay(100);
 
   imuStab.setDeviceConfig();       // load default register map
@@ -1498,23 +1567,33 @@ void setup() {
   imuStab.setGyroLP1Bandwidth(ISM_MEDIUM);
 
   // ---- Magnetometer (on stabilized platform) ------------------------------
+  // NOT fatal. Nothing in the current configuration reads the magnetometer:
+  // collectIMUData_ISM() is called with isStabilizedIMU=false for BOTH IMUs, so the
+  // branch that touches the MMC5983MA never executes. Halting the whole mission over a
+  // device whose output is unused cost a deployment for no benefit (Issue 46).
+  //
+  // magPresent gates the 0x07 record so a re-enabled 9-DOF build cannot silently log a
+  // dead sensor. If 9-DOF is re-enabled AND the magnetometer is required, check
+  // magPresent here and decide deliberately — do not restore a bare while(1).
   DBG_PRINTLN("*Initializing stabilized magnetometer...");
-  if (!mag.begin()) {
-    DBG_PRINTLN("Magnetometer failed!");
-    while (1);
+  magPresent = mag.begin();
+  if (!magPresent) {
+    DBG_PRINTLN("WARNING: magnetometer init failed — continuing without it.");
+    DBG_PRINTLN("         (Nothing reads it while both IMUs run 6-DOF.)");
+  } else {
+    DBG_PRINTLN("Stabilized magnetometer OK");
   }
-  DBG_PRINTLN("Stabilized magnetometer OK");
 
   // ---- Fixed IMU (I²C 0x6A) -----------------------------------------------
   DBG_PRINTLN("*Initializing fixed IMU...");
   if (!imuFixed.begin(0x6A)) {
     DBG_PRINTLN("Fixed IMU failed!");
-    while (1);
+    haltWithBlinkCode(4);
   }
   DBG_PRINTLN("Fixed IMU OK");
 
   imuFixed.deviceReset();
-  while (!imuFixed.getDeviceReset());
+  waitForDeviceReset(imuFixed, "fixed IMU");
   delay(100);
 
   imuFixed.setDeviceConfig();
@@ -1734,7 +1813,7 @@ void setup() {
   // two-argument overload is (clock, csPin), not (csPin, speed).
   if (!SD.begin(CS_SD)) {
     DBG_PRINTLN("SD card failed!");
-    while (1);
+    haltWithBlinkCode(5);
   }
   DBG_PRINTLN("SD card OK");
 
@@ -1784,13 +1863,13 @@ void setup() {
 
   if (!filenameFound) {
     DBG_PRINTLN("FATAL: no unused SD log filename remains; refusing to overwrite data.");
-    while (1);
+    haltWithBlinkCode(6);
   }
 
   logFile = SD.open(fname, FILE_WRITE);
   if (!logFile) {
     DBG_PRINTLN("Failed to open log file!");
-    while (1);
+    haltWithBlinkCode(7);
   }
   DBG_PRINT("Logging to "); DBG_PRINTLN(fname);
 
@@ -2053,10 +2132,11 @@ void loop() {
                        : dtNominal;
 
     // Collect calibrated, filtered, AHRS-processed data from both IMUs.
-    // The stabilized IMU is currently run in 6-DOF mode (mag disabled);
-    // change the isStabilizedIMU argument to 'true' to re-enable 9-DOF with magnetometer.
+    // The fixed IMU has no magnetometer, so it is always 6-DOF. The stabilized IMU
+    // follows STAB_IMU_USES_MAG (currently 0 — see the flag's definition).
     lastFixedIMU = collectIMUData_ISM(imuFixed, filterFixed, fixedCal, false, lpfFixed, dtActual);
-    lastStabIMU  = collectIMUData_ISM(imuStab,  filterStab,  stabCal,  false, lpfStab,  dtActual);
+    lastStabIMU  = collectIMUData_ISM(imuStab,  filterStab,  stabCal,
+                                      STAB_IMU_USES_MAG && magPresent, lpfStab, dtActual);
     lastFixedIMU.interval_us = imuInterval_us;
     lastStabIMU.interval_us  = imuInterval_us;
     imuReady = true;
@@ -2155,10 +2235,19 @@ void loop() {
       };
       sdAppendRecord(TYPE_STAB_IMU, nowMs, stabRecord);
 
-      struct __attribute__((packed)) MagRecord {
-        float mx, my, mz;
-      } magRecord = { lastStabIMU.mx, lastStabIMU.my, lastStabIMU.mz };
-      sdAppendRecord(TYPE_MAG, nowMs, magRecord);
+      // Only write 0x07 when the magnetometer was actually read this tick. The mx/my/mz
+      // fields are copies of an LPFState that collectIMUData_ISM() updates ONLY on the
+      // isStabilizedIMU=true path. With both IMUs running 6-DOF that state is never
+      // touched, so this record used to log constant 0.0 every tick — indistinguishable
+      // in the CSV from a real reading near the calibration centre, and a parser has no
+      // way to tell the difference. Absent records are unambiguous; fabricated ones are
+      // not (Issue 46). Re-enabling 9-DOF restores the record automatically.
+      if (STAB_IMU_USES_MAG && magPresent) {
+        struct __attribute__((packed)) MagRecord {
+          float mx, my, mz;
+        } magRecord = { lastStabIMU.mx, lastStabIMU.my, lastStabIMU.mz };
+        sdAppendRecord(TYPE_MAG, nowMs, magRecord);
+      }
 #endif  // IMU_RAW_ONLY
     }
   }
@@ -2408,13 +2497,16 @@ void loop() {
     };
     TELEM_WRITE(statsPkt);
 
-    // Close the window once it has run its full length.
+    // Close the window once it has run its full length. currentDropped is reset with
+    // the rest of the window state: leaving it cumulative made it incomparable to the
+    // per-window n_samples sitting next to it in the packet (Issue 45).
     if (windowMs >= CURRENT_STATS_WINDOW_MS) {
       statCharge_mC     = 0.0;
       statI2t_mA2s      = 0.0;
       statIntegSec      = 0.0;
       statPeakCounts    = 0;
       statSamples       = 0;
+      currentDropped    = 0;
       statWindowStartMs = nowMs;
     }
   }

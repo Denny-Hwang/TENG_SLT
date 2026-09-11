@@ -4,6 +4,70 @@ Newest first.
 
 ---
 
+## 2026-09-11 — Split the parser into `vertisea_protocol.py`; fix Issues 43, 44, 48–51 — `[UNCONFIRMED]`
+
+**Why the split.** The parser could not be imported without `tkinter`, `matplotlib` and
+`pyserial`, because it lived at module scope in the GUI file. That is why it had no tests:
+writing one meant installing a display stack. Since this is the *only* reader of the SD
+format — the MATLAB parser was retired for being an unexercised second copy — the one piece
+of code that most needs testing was the one piece that could not be tested.
+
+`vertisea_protocol.py` now holds the type constants, `_SD_PAYLOAD_BYTES`, `_CSV_SCHEMAS`,
+`parse_binary_file()` and `write_csvs_from_parsed()`, stdlib only. `vertisea_plot_v7.py`
+imports the radio-facing names from it and defines no packet layout of its own. The
+protocol module also runs as a batch CLI (`python3 vertisea_protocol.py *.BIN`), so
+converting a deployment's logs no longer needs a GUI session.
+
+`tests/test_binary_protocol.py` (24 tests, stdlib `unittest`) builds `.BIN` byte streams
+from `docs/binary_protocol.md` with a writer independent of the parser, and asserts the
+values round-trip. It covers every fixed layout, both variable-length records, the derived
+mA/volt conversions, `micros()` wrap in the Hall post-pass, truncated and corrupt input,
+and CSV export. It explicitly does **not** compile the firmware — Issue 35 is the standing
+reminder that a passing round-trip says nothing about whether a field can hold real values.
+
+**Issue 43 — crash with no serial ports.** `tk.OptionMenu(master, variable, value, *values)`
+takes `value` as a required positional argument, so `*ports` on an empty list raised
+`TypeError` before the window appeared. That killed the *offline* workflow specifically —
+"run the GUI, click Load BIN File, no serial needed" — on exactly the analyst laptops most
+likely to have no COM port. Now falls back to a `<no serial ports>` placeholder that
+`connect_serial()` rejects with a message pointing at Load BIN File.
+
+**Issue 44 — a dropped link killed the GUI silently.** `self.ser.in_waiting` /
+`.read()` were unguarded inside the `after()` callback. Unplugging the modem raised, Tk
+printed a traceback nobody sees, and the callback was never rescheduled — so every panel
+froze permanently while the window stayed responsive. A frozen plot is indistinguishable
+from a calm sea, which makes this the worst possible failure mode for a deployment.
+`update()` is now a wrapper whose `finally` always reschedules; the body is `_update_once()`;
+`SerialException`/`OSError` route to `_on_link_lost()`, which closes the port and shows
+"LINK LOST" plus the reason in a new status label.
+
+**Issue 48 — redraw storm.** Three `draw()` calls per `0x06` packet, inside the drain loop.
+At 10 Hz that is ~30 blocking redraws/second, and any backlog made redraw time exceed the
+arrival interval — the feedback loop that turns a slow GUI into a stuck one. Canvases are
+now collected in a `dirty` set and drawn once per tick with `draw_idle()`.
+
+**Issue 49 — ts10 wrap.** `_ts10_last` was advanced only by `0x06`, while `0x0C` reused the
+offset, so around each 655 s boundary the RPM trace could land 655 s from the attitude
+trace. Both now call `_monotonic_seconds()`.
+
+**Issue 50 — port leak.** `connect_serial()` overwrote `self.ser` without closing it; on
+Windows the stale handle kept the port locked until the process exited. Added
+`_close_serial()`.
+
+**Issue 51 / part of 38 — the summary lied about the default build.** The parse dialog
+iterated a hard-coded key list missing `imu_raw`, `rtc_event`, `fixed_cal` and `stab_cal`,
+so a log from the committed `IMU_RAW_ONLY 1` firmware reported zero IMU records while
+`_imuRaw.csv` was written correctly — and a "No Buoy IMU Data" *warning* popped for the
+same reason, training operators to dismiss warnings unread. The summary now iterates
+`_CSV_SCHEMAS`, so new packet types appear automatically, and the raw-only case is a note
+explaining how to recompute attitude offline rather than a warning.
+
+**Not changed:** the framing-free byte-scan resync, per AGENTS.md. Issue 40 (in-memory
+parse on the Tk thread) also remains open — the split is a prerequisite for fixing it with
+a streaming writer, not the fix itself.
+
+---
+
 ## 2026-09-08 — Parse and display battery voltage and average power — `[UNCONFIRMED]`
 
 Added `0x13` battery calibration and `0x14` battery voltage to the sole SD parser, producing

@@ -118,7 +118,7 @@ making the retirement reversible.
   sections**. Not rewritten — dead documentation to prune in a dedicated docs pass; its
   magnetometer-calibration content is still correct and in use.
 
-**`docs/CHANGELOG_parse_vertisea_log_v4.m.md` is retained.** Its eight `[UNCONFIRMED]`
+**`CHANGELOG_parse_vertisea_log_v4.m.md` is retained** (moved to `archived/` 2026-09-11). Its eight `[UNCONFIRMED]`
 entries stay that way permanently and correctly — they describe changes written but never
 executed. Deleting the record would erase the fact that the code was modified blind.
 

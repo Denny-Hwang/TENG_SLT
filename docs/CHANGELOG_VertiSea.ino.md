@@ -3,6 +3,58 @@
 Newest first.
 
 ---
+
+## 2026-09-11 — Issues 45–47: per-window `n_dropped`, non-fatal magnetometer, diagnosable halts — `[UNCONFIRMED]`
+
+**Issue 45 — `n_dropped` was incomparable to `n_samples`.** The window-close block reset
+`statCharge_mC`, `statI2t_mA2s`, `statIntegSec`, `statPeakCounts` and `statSamples`, but not
+`currentDropped`, which stayed cumulative since boot. The two sit side by side in
+`TYPE_CURRENT_STATS` and in the GUI, so the ratio a reader naturally forms from them was
+meaningless, and the value grew without bound over a deployment. `currentDropped` is now
+reset with the rest of the window state. The packet layout is **unchanged** — same field,
+same offset, same type — so no parser change was needed; only the meaning narrowed, and the
+field comments say so.
+
+**Issue 46 — the magnetometer was a fatal dependency on a device nothing reads.**
+`collectIMUData_ISM()` is called with `isStabilizedIMU=false` for *both* IMUs, so the branch
+that touches the MMC5983MA never executes. Yet `mag.begin()` failing halted the board
+forever, and with `IMU_RAW_ONLY 0` the `TYPE_MAG` record was still written every tick from
+an `LPFState` nothing updated — constant `0.0`, indistinguishable in the CSV from a real
+reading near the calibration centre.
+
+Two changes. `mag.begin()`'s result goes into a new `magPresent` global and a failure warns
+instead of halting. And the 9-DOF decision moved from a bare `false` literal at the call
+site to `#define STAB_IMU_USES_MAG 0`, which now gates both the sensor read and the `0x07`
+write. A 6-DOF build emits no `0x07` at all: an absent record is unambiguous, a fabricated
+zero is not. Re-enabling 9-DOF restores both from one place.
+
+> Logs written before this date by an `IMU_RAW_ONLY 0` build contain a `_mag.csv` of
+> constant zeros. Those are not measurements.
+
+**Issue 47 — partial.** `while (!imu.getDeviceReset());` appeared twice as an unbounded spin
+on an I²C read; a NAK or a wedged bus hung the firmware there with no timeout. Both are now
+`waitForDeviceReset()`, which gives up after 500 ms (the datasheet reset is sub-millisecond)
+and warns.
+
+Every fatal `while (1);` is now `haltWithBlinkCode(n)`. Previously a field build
+(`USB_DEBUG 0`) compiled out the DBG_PRINTLN above each halt, left the LED solid HIGH from
+the top of `setup()`, and initialised no port — so a dead buoy was completely silent about
+why, and the fault could not be diagnosed without reflashing a debug build. The codes are
+1 RTC, 2 BME280, 3 stabilized IMU, 4 fixed IMU, 5 SD card, 6 filenames exhausted, 7 file
+open failed.
+
+**Deliberately NOT changed:** whether these failures should halt at all. Continuing in a
+degraded mode and recording the failure in a boot-status packet is a plausible design, and
+so is enabling the Apollo3 watchdog, but both change what a deployment produces and that is
+the project owner's call. Issue 47 stays open for it. **Issue 41 (accel X and gyro Y negated
+into two different body frames) was likewise not touched** — it needs the mechanical drawing
+and a rotation test, and guessing at it would be worse than leaving it documented.
+
+**Verification:** syntax-checked with `g++ -fsyntax-only -std=c++14 -Wall -Wextra` against
+stub Arduino/SparkFun headers. Same single pre-existing `%lu` format warning as the
+unmodified file, no new diagnostics. Not compiled for Apollo3 and not run on hardware.
+
+---
 ## 2026-09-11 — Correct the `IMUCal` unit comments (mdps, not °/s) — `[UNCONFIRMED]`
 
 **Comment-only change; no behaviour, no packet layout, no constant values changed.**

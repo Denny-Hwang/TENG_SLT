@@ -56,20 +56,20 @@ issue is fixed; do not delete resolved entries.
 | 35 | 🔴 Critical | `VertiSea.ino` | `TYPE_IMU_RAW` gyro fields overflowed int16 (mdps, not counts) | ✅ Fixed + verified (int32) |
 | 36 | 🟡 Medium | `VertiSea.ino` / `vertisea_plot_v7.py` | RFD900 radio transport unverified since the packet-set overhaul (USB path is verified) | ⚠ Open |
 | 37 | 🟠 High | `VertiSea.ino` | Telemetry arrives at an irregular real-time rate — polled gate inherits loop-pass jitter from 1000 Hz ADC sampling | ⚠ Open |
-| 38 | 🟡 Medium | `vertisea_plot_v7.py` | BIN loader mishandles the expected `IMU_RAW_ONLY=1` user experience | ⚠ Open |
+| 38 | 🟡 Medium | `vertisea_plot_v7.py` | BIN loader mishandles the expected `IMU_RAW_ONLY=1` user experience | 🔄 Dialogs fixed 2026-09-11; stale 450 RPM plot scale still open |
 | 39 | 🟢 Low | `VertiSea.ino` / `vertisea_plot_v7.py` | `integ_s` comments and GUI “duty” interpretation no longer match measured-dt integration | ⚠ Open (documentation/semantics) |
 | 40 | 🟡 Medium | `vertisea_plot_v7.py` | SD parser materialises every expanded sample and blocks the Tk main thread | ⚠ Open |
 | 41 | 🔴 Critical | `VertiSea.ino` | Accel and gyro are handed to Madgwick in two different body frames (accel X negated, gyro Y negated) | ⚠ Open |
 | 42 | 🟠 High | `VertiSea.ino` / docs | `IMUCal.gyro_bias[]` is millidegrees/s but was documented as °/s — the 2026-04-02 recalibration was applied 1000× too small | 🔄 Docs corrected 2026-09-11; constants still need re-deriving |
-| 43 | 🟠 High | `vertisea_plot_v7.py` | GUI raises `TypeError` at startup when the machine has no serial ports, blocking the offline "Load BIN File" workflow | ⚠ Open |
-| 44 | 🟠 High | `vertisea_plot_v7.py` | An unplugged radio raises inside the Tk `after()` callback, silently stopping all GUI updates permanently | ⚠ Open |
-| 45 | 🟡 Medium | `VertiSea.ino` | `TYPE_CURRENT_STATS.n_dropped` is cumulative since boot while `n_samples` resets per window — the pair cannot be compared | ⚠ Open |
-| 46 | 🟡 Medium | `VertiSea.ino` | Magnetometer is a fatal boot dependency but is never read; with `IMU_RAW_ONLY 0` it silently logs constant zeros | ⚠ Open |
-| 47 | 🟡 Medium | `VertiSea.ino` | Every sensor init failure halts in `while(1)` with no watchdog — a field buoy bricks itself and logs nothing | ⚠ Open |
-| 48 | 🟡 Medium | `vertisea_plot_v7.py` | Live parser redraws three matplotlib canvases per packet inside the drain loop | ⚠ Open |
-| 49 | 🟢 Low | `vertisea_plot_v7.py` | `_ts10_last` is only advanced by `0x06`, so the RPM series can mis-handle a ts10 wrap | ⚠ Open |
-| 50 | 🟢 Low | `vertisea_plot_v7.py` | `connect_serial()` never closes a previously opened port | ⚠ Open |
-| 51 | 🟢 Low | `vertisea_plot_v7.py` | `load_bin_file()` summary omits `imu_raw`, `rtc_event`, `fixed_cal`, `stab_cal` — the default build reports zero IMU records | ⚠ Open |
+| 43 | 🟠 High | `vertisea_plot_v7.py` | GUI raises `TypeError` at startup when the machine has no serial ports, blocking the offline "Load BIN File" workflow | ✅ Resolved 2026-09-11 |
+| 44 | 🟠 High | `vertisea_plot_v7.py` | An unplugged radio raises inside the Tk `after()` callback, silently stopping all GUI updates permanently | ✅ Resolved 2026-09-11 |
+| 45 | 🟡 Medium | `VertiSea.ino` | `TYPE_CURRENT_STATS.n_dropped` is cumulative since boot while `n_samples` resets per window — the pair cannot be compared | ✅ Resolved 2026-09-11 |
+| 46 | 🟡 Medium | `VertiSea.ino` | Magnetometer is a fatal boot dependency but is never read; with `IMU_RAW_ONLY 0` it silently logs constant zeros | ✅ Resolved 2026-09-11 |
+| 47 | 🟡 Medium | `VertiSea.ino` | Every sensor init failure halts in `while(1)` with no watchdog — a field buoy bricks itself and logs nothing | 🔄 Halts now blink a diagnostic code and the reset spins are bounded; halt-vs-degrade policy still open |
+| 48 | 🟡 Medium | `vertisea_plot_v7.py` | Live parser redraws three matplotlib canvases per packet inside the drain loop | ✅ Resolved 2026-09-11 |
+| 49 | 🟢 Low | `vertisea_plot_v7.py` | `_ts10_last` is only advanced by `0x06`, so the RPM series can mis-handle a ts10 wrap | ✅ Resolved 2026-09-11 |
+| 50 | 🟢 Low | `vertisea_plot_v7.py` | `connect_serial()` never closes a previously opened port | ✅ Resolved 2026-09-11 |
+| 51 | 🟢 Low | `vertisea_plot_v7.py` | `load_bin_file()` summary omits `imu_raw`, `rtc_event`, `fixed_cal`, `stab_cal` — the default build reports zero IMU records | ✅ Resolved 2026-09-11 |
 
 ---
 
@@ -1862,6 +1862,12 @@ COM ports. The program dies with a traceback and no usable error.
 `connect_serial()` reject the placeholder with a message box. `refresh_ports()` needs the same
 guard so the menu can recover once a device is plugged in.
 
+
+**Resolution (2026-09-11):** the dropdown is now built with
+`*(ports or [self.NO_PORTS])`, `refresh_ports()` applies the same guard, and
+`connect_serial()` rejects the placeholder with a message box that points the user at
+**Load BIN File** for offline work.
+
 ---
 
 ### Issue 44 — 🟠 High: a serial error inside `update()` silently stops the entire GUI
@@ -1890,6 +1896,13 @@ screen indicates the link is gone.
 drive the SD/connection indicator to a visible "DISCONNECTED" state, and — critically — put the
 `root.after(100, self.update)` reschedule in a `finally` block so the loop can never die.
 
+
+**Resolution (2026-09-11):** `update()` is now a thin wrapper whose `finally` block always
+issues `root.after(100, self.update)`, so the poll loop cannot die. The body moved to
+`_update_once()`; `serial.SerialException` and `OSError` are caught and routed to
+`_on_link_lost()`, which closes the port, drives the status indicator to "LINK LOST", and
+shows the reason in a new connection-state label beside the Connect button.
+
 ---
 
 ### Issue 45 — 🟡 Medium: `n_dropped` is since-boot while `n_samples` is per-window
@@ -1911,6 +1924,12 @@ makes the one field intended to expose sampling health unusable for that purpose
 **Suggested resolution:** Either reset `currentDropped` with the rest of the window state and
 document it as per-window, or keep it cumulative and rename the packet field (and its GUI
 label) to say so. Prefer the former: it makes `n_dropped` comparable to `n_samples`.
+
+
+**Resolution (2026-09-11):** `currentDropped` is reset alongside the rest of the window
+state when the window closes, so `n_dropped` and `n_samples` now cover the same interval.
+The packet field comment and the `CURRENT_RATE_HZ` note were updated to say
+"this window". The GUI needed no change — it only displays the value.
 
 ---
 
@@ -1942,6 +1961,18 @@ fabricated data channel in any `IMU_RAW_ONLY 0` log.
 continue) since nothing depends on it; and skip writing `0x07` entirely while 9-DOF is
 disabled, rather than writing zeros. If 9-DOF is re-enabled, restore both.
 
+
+**Resolution (2026-09-11):** two parts.
+
+1. `mag.begin()` no longer halts. Its result is stored in a new global `magPresent`, and a
+   failure logs a warning and continues — nothing reads the device while both IMUs run
+   6-DOF, so bricking the mission over it bought nothing.
+2. The 9-DOF decision moved from a bare `false` literal at the call site to a single
+   `#define STAB_IMU_USES_MAG 0`, and the `TYPE_MAG` write is now gated on
+   `STAB_IMU_USES_MAG && magPresent`. A 6-DOF build no longer emits `0x07` at all, so a
+   parser sees *absent* records instead of fabricated zeros. Re-enabling 9-DOF restores
+   both the read and the record from one place.
+
 ---
 
 ### Issue 47 — 🟡 Medium: every sensor init failure halts the board with no watchdog
@@ -1967,6 +1998,18 @@ continue with whatever sensors did initialise. Reserve a true halt for "no SD ca
 the only failure that makes logging pointless — and even then, prefer enabling the Apollo3
 watchdog so the board reboots and retries. Add timeouts to the `getDeviceReset()` spins.
 
+
+**Partial resolution (2026-09-11):** the two unbounded `while (!imu.getDeviceReset());`
+spins are now `waitForDeviceReset()`, which times out after 500 ms and warns. Every fatal
+`while (1);` is now `haltWithBlinkCode(n)`, which blinks a per-fault pulse count forever
+(1 RTC, 2 BME280, 3 stab IMU, 4 fixed IMU, 5 SD, 6 filenames exhausted, 7 file open) so a
+field operator can read the fault off the board with no USB host.
+
+**Still open:** whether these failures should halt at all. Continuing in a degraded mode —
+logging what did initialise and recording the failure in a boot-status packet — is a
+deployment-policy decision for the project owner, not something to change unilaterally.
+Enabling the Apollo3 watchdog so a transient fault self-recovers is the other half.
+
 ---
 
 ### Issue 48 — 🟡 Medium: live parser redraws three canvases per packet
@@ -1990,6 +2033,11 @@ frozen GUI and a dead GUI look identical.
 issue at most one `draw_idle()` per canvas per `update()` tick, after the loop. `draw_idle()`
 also lets Tk coalesce repaints.
 
+
+**Resolution (2026-09-11):** the drain loop now collects touched canvases into a `dirty`
+set and issues one `draw_idle()` per canvas after the buffer is empty, instead of up to
+three blocking `draw()` calls per packet.
+
 ---
 
 ### Issue 49 — 🟢 Low: ts10 wrap handling is not shared with the RPM stream
@@ -2009,6 +2057,11 @@ RPM series can be plotted a full 655.36 s away from the attitude series.
 (`self._monotonic_seconds(ts10)`) and call it from every branch that carries a `ts10`, so all
 streams share one wrap counter.
 
+
+**Resolution (2026-09-11):** wrap tracking moved into `_monotonic_seconds(ts10)`, which
+both the `0x06` and `0x0C` branches call, so every ts10-bearing stream shares one wrap
+counter.
+
 ---
 
 ### Issue 50 — 🟢 Low: `connect_serial()` leaks the previously opened port
@@ -2024,6 +2077,10 @@ with "access denied" and the user has to restart the program.
 
 **Suggested resolution:** `if self.ser and self.ser.is_open: self.ser.close()` before opening,
 inside its own `try/except`.
+
+
+**Resolution (2026-09-11):** `connect_serial()` calls a new `_close_serial()` helper first,
+which closes and clears any existing handle inside its own `try/except`.
 
 ---
 
@@ -2045,3 +2102,10 @@ the same reason.
 records, in `_schemas` order — instead of a parallel hard-coded list that has to be kept in
 sync by hand. That also fixes step 5 of the README's "adding a new packet type" checklist
 permanently.
+
+
+**Resolution (2026-09-11):** `_CSV_SCHEMAS` moved to module scope in the new
+`vertisea_protocol.py` and the summary iterates it directly, so a newly added packet type
+appears in the dialog automatically. The "No Buoy IMU Data" warning popup became a note in
+the summary that explains the `IMU_RAW_ONLY=1` case and points at the CSVs needed to
+recompute attitude offline (also addresses part of Issue 38).
