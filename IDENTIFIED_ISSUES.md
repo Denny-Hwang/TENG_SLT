@@ -2602,3 +2602,93 @@ the buoy over USB is legitimate when the firmware is built for it.
 
 **Not fixed:** the reset itself is a hardware path (CH340E RTS → Artemis reset) and cannot be
 closed in software on the host side. During a logging run, do not open the buoy's USB port.
+
+---
+
+### Issue 64 — 🟠 High: a backwards `micros()` step was reported as a 71-minute loop stall
+
+**Found:** 2026-09-11, from a real log whose parse warning read *"LOOP STALL: longest loop()
+pass was 4294967 ms … most likely an I2C stall."*
+
+4 294 967 ms is 4 294 967 295 µs, which is `UINT32_MAX`. It is not a measurement of anything.
+
+`micros()` on Apollo3 is **not strictly monotonic**: the value is derived from the STIMER
+through an integer conversion, and two adjacent calls can return `n` then `n-1` when a read
+straddles the clock-domain boundary. The loop timer does
+
+```cpp
+uint32_t loopUs = (uint32_t)(nowUs - lastLoopEntryUs);
+if (loopUs > loopMaxUs) loopMaxUs = loopUs;
+```
+
+which is correct across the genuine ~71.6 min rollover — unsigned subtraction handles that
+and yields a *small* delta — but turns a **one-microsecond backward step into 4 294 967 295**.
+And because `loopMaxUs` is a max-hold reset only once a second, that single glitch owns the
+entire interval.
+
+The consequence was worse than a wrong number. The host parser's health post-pass, added
+specifically so that an operator would not have to interpret raw counters, took the value at
+face value and produced an authoritative, specific, and completely wrong diagnosis pointing
+at the I²C bus. The board was running normally: the same log's sane records show a worst
+loop pass of 48 ms. A diagnostic that fabricates a fault is worse than no diagnostic, because
+it is acted on.
+
+`sdServiceMaxUs` around `logFile.write()` had the identical exposure and would have reported
+a multi-thousand-second SD write.
+
+**Fix, firmware.** `TIMING_MAX_PLAUSIBLE_US` (60 s) is the ceiling above which a µs delta is
+treated as a timer fault rather than a measurement. Both timers now discard such a delta and
+set a new sticky `timerAnomaly`, reported as `HEALTH_FLAG_TIMER_ANOM` (bit 2 of the existing
+`flags` byte — no packet-layout change, so old parsers still read the record) and reset
+alongside the maxima it protects. 60 s is unreachable by any real mechanism: the SD path tops
+out near 50 ms, and an I²C stall long enough to approach it would have taken the heartbeat LED
+with it long before.
+
+Discarding is safe in the direction that matters. A real stall is three orders of magnitude
+below the ceiling, so nothing diagnosable is lost; keeping the value reports a 71-minute loop
+pass on a board that never missed a beat.
+
+**Fix, parser.** Records at or above `TIMING_IMPLAUSIBLE_US` are excluded from the maxima and
+reported separately as `TIMER ANOMALY`, by value as well as by flag so that logs written
+before this change are still read correctly rather than left to report a stall. Four
+regression tests cover it, including that a genuine 980 ms stall is still reported.
+
+---
+
+### Issue 65 — 🔴 Critical: the Hall line is carrying 36× the mechanically possible edge rate
+
+**Found:** 2026-09-11, same log. **94 691 edges rejected, 1 211.8/s average.**
+
+This is Issue 54's hypothesis confirmed with a number, and it is the direct measurement of
+what the user described at the very start of this work: *"측정쪽 신호에 영향을 받는 것 같음"*
+— the LED behaviour changing with the measurement signal.
+
+One magnet at 2000 RPM produces **33.3 edges/s**. The ISR rejected 1 211.8/s as arriving
+faster than `RPM_MIN_PERIOD_US` (20 000 µs = 3000 RPM, already 1.5× above what the harvester
+reaches). That is 36× the maximum rate the mechanism can physically produce, sustained over
+the whole record. It is not contact bounce and not a marginal magnet gap; it is electrical
+interference coupling into the Hall line from the harvester.
+
+Two consequences, and the second is the one that matters for a 1–2 day deployment:
+
+1. **The RPM channel is unusable.** Every interval spanning a spurious edge is discarded, so
+   what survives is not a measurement of rotor speed.
+2. **Every rejected edge still costs an interrupt.** The source-level rejection added in
+   Issue 54 keeps the storm out of the SD pipeline — which is why this log shows
+   `overruns=0` where an earlier build would have overrun and latched `sdError` — but it
+   cannot make the interrupt free. At 1 212/s the average load is small; the danger is that
+   the average hides bursts, and a burst dense enough to starve `loop()` past the 500 ms
+   heartbeat interval is exactly the "LED stops blinking" symptom that started this.
+
+**This is a wiring fault and must be fixed at the wiring.** Shield the Hall line; route it
+and its return away from the harvester output; add an RC low-pass at the sensor pin. Setting
+`RPM_ENABLE 0` removes the interrupt load and is a legitimate stopgap for a deployment that
+does not need RPM — it is what confirmed the Issue 59 diagnosis — but it does not remove the
+noise, and the same coupling is present on every other line that shares the routing.
+
+**How to confirm the coupling directly:** run ~10 min with the harvester turning and ~10 min
+with it stopped, and compare `hall_rejected` between the two `_sysHealth.csv` files. If the
+count tracks the harvester, the path is established.
+
+The parser now states the ratio to the mechanical maximum rather than a bare count, and calls
+interference by name above 5×.

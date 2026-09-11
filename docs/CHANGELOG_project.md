@@ -5,6 +5,28 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-11 (later) — Health diagnostics told the truth about the wrong thing
+
+Two findings from the first real `_sysHealth.csv`, and a fix to the diagnostic that reported
+them.
+
+**The Hall line is carrying 36x the mechanically possible edge rate** — 94 691 edges rejected,
+1 211.8/s, against 33.3/s for one magnet at 2000 RPM. Issue 54's hypothesis, now measured.
+This is the "LED is affected by the measurement signal" symptom that started this work. It is
+a wiring fault: shield the Hall line, route it away from the harvester output and its return,
+add an RC at the sensor pin. Issue 65.
+
+**A backwards `micros()` step was being reported as a 71-minute loop stall.** `UINT32_MAX`
+microseconds in `loop_max_us` is a timer fault, not a measurement, and the parser's health
+post-pass — added so an operator would not have to interpret raw counters — took it at face
+value and blamed the I²C bus on a board that was running normally. A diagnostic that
+fabricates a fault is worse than none, because it gets acted on. Firmware now rejects
+implausible deltas at the source and flags them; the parser excludes them from the maxima and
+reports them for what they are, by value as well as by flag so older logs read correctly.
+Issue 64.
+
+---
+
 ## 2026-09-11 — Add `environment.yml`; teach the `.bat` launchers the conda layout — `[UNCONFIRMED]`
 
 **Why:** the host-side Python setup was three words of prose (`pip install pyserial

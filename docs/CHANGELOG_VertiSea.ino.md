@@ -4,6 +4,30 @@ Newest first.
 
 ---
 
+## 2026-09-11 (later) — Reject impossible micros() deltas instead of max-holding them — `[UNCONFIRMED]`
+
+A real log reported `loop_max_us` = 4 294 967 295, i.e. `UINT32_MAX`, which the host parser
+turned into "4294967 ms loop stall, most likely an I2C stall". There was no stall — the same
+log's sane records peak at 48 ms.
+
+`micros()` on Apollo3 is not strictly monotonic: two adjacent calls can return `n` then `n-1`
+when a read straddles the STIMER clock-domain boundary. `nowUs - lastLoopEntryUs` is correct
+across the genuine ~71.6 min rollover (unsigned subtraction gives a small delta there) but
+turns a one-microsecond backward step into 4 294 967 295 µs — and `loopMaxUs` max-holds it for
+the whole second. `sdServiceMaxUs` around `logFile.write()` had the same exposure.
+
+Both now discard a delta above `TIMING_MAX_PLAUSIBLE_US` (60 s) and set `timerAnomaly`,
+reported as `HEALTH_FLAG_TIMER_ANOM` — bit 2 of the existing `flags` byte, so the 29-byte
+`SysHealth` layout is unchanged and older parsers still read the record. The flag resets with
+the maxima it protects, so the host can distinguish "no stall measured" from "the measurement
+was rejected".
+
+60 s is unreachable by any real mechanism, so nothing diagnosable is lost: the SD path tops
+out near 50 ms, and an I²C stall approaching a minute would have frozen the heartbeat LED long
+before. Issue 64.
+
+---
+
 ## 2026-09-11 — USB_DEBUG line printed counters the health block had just zeroed — `[UNCONFIRMED]`
 
 Field output showed `maxWriteUs=0` on every 1 Hz debug line, which is exactly the number

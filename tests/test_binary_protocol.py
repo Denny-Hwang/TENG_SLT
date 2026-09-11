@@ -232,6 +232,59 @@ class TestSysHealth(unittest.TestCase):
         self.assertFalse(r['sd_error'])
         self.assertTrue(r['mag_absent'])
 
+    def test_backwards_micros_is_not_reported_as_a_stall(self):
+        """0xFFFFFFFF in loop_max_us is a timer fault, not a 71-minute loop pass.
+
+        micros() on Apollo3 can return n then n-1; the firmware's unsigned subtraction
+        turns that 1 us backward step into 4 294 967 295 us, and loopMaxUs max-holds it for
+        the whole interval. A real log did exactly this on 2026-09-11 and the parser
+        reported "4294967 ms ... most likely an I2C stall" on a board that never stalled.
+        """
+        data = parse_bytes(
+            sys_health(1000, loop_max_us=2837, sd_write_max_us=1104) +
+            sys_health(2000, loop_max_us=0xFFFFFFFF, sd_write_max_us=1200,
+                       flags=vs.HEALTH_FLAG_TIMER_ANOM) +
+            sys_health(3000, loop_max_us=3100, sd_write_max_us=1150))
+        self.assertEqual(structural_errors(data), [])
+        self.assertTrue(data['sys_health'][1]['timer_anomaly'])
+        self.assertFalse(data['sys_health'][0]['timer_anomaly'])
+
+        joined = " ".join(data['errors'])
+        self.assertIn("TIMER ANOMALY", joined)
+        # The implausible record must not be read as a stall, and must not poison the max.
+        self.assertNotIn("LOOP STALL", joined)
+        self.assertIn("1 of 3 health records", joined)
+
+    def test_old_firmware_without_the_flag_is_still_recognised(self):
+        """Logs predating the flag must be read by value, not left to report a stall."""
+        data = parse_bytes(
+            sys_health(1000, loop_max_us=2837, sd_write_max_us=1104) +
+            sys_health(2000, loop_max_us=4294967295, sd_write_max_us=1200, flags=0))
+        self.assertFalse(data['sys_health'][1]['timer_anomaly'])
+        joined = " ".join(data['errors'])
+        self.assertIn("TIMER ANOMALY", joined)
+        self.assertNotIn("LOOP STALL", joined)
+
+    def test_a_real_stall_is_still_reported(self):
+        """The anomaly filter must not swallow a genuine multi-hundred-ms stall."""
+        data = parse_bytes(
+            sys_health(1000, loop_max_us=980_000, sd_write_max_us=1200) +
+            sys_health(2000, loop_max_us=3100, sd_write_max_us=1150))
+        joined = " ".join(data['errors'])
+        self.assertIn("LOOP STALL", joined)
+        self.assertIn("980 ms", joined)
+
+    def test_hall_storm_is_quantified_against_the_mechanical_maximum(self):
+        """A bare count is not actionable; the ratio to 33 edges/s is."""
+        data = parse_bytes(
+            sys_health(1000, hall_rejected=0) +
+            sys_health(79000, hall_rejected=94691))
+        joined = " ".join(data['errors'])
+        self.assertIn("HALL EDGE NOISE", joined)
+        self.assertIn("This is interference, not bounce", joined)
+        # 94691 / 78 s = 1214/s, 36x the 33.3/s mechanical ceiling.
+        self.assertIn("36x", joined)
+
     def test_counters_hold_a_multi_day_deployment(self):
         """uint32 must not wrap over a 2-day run — that is the design target."""
         two_days_us = 2 * 86400 * 1000000

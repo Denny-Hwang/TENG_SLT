@@ -970,7 +970,13 @@ bool sdServiceOneSector() {
   uint32_t startUs = micros();
   size_t written = logFile.write(sdWriteScratch, SD_SECTOR_BYTES);
   uint32_t elapsedUs = micros() - startUs;
-  if (elapsedUs > sdServiceMaxUs) sdServiceMaxUs = elapsedUs;
+  // Same non-monotonic micros() exposure as the loop timer above. A backwards step here
+  // would report a multi-thousand-second SD write and send the reader after the card.
+  if (elapsedUs > TIMING_MAX_PLAUSIBLE_US) {
+    timerAnomaly = true;
+  } else if (elapsedUs > sdServiceMaxUs) {
+    sdServiceMaxUs = elapsedUs;
+  }
 
   if (written != SD_SECTOR_BYTES) {
     setSdError("ERROR: SD sector write failed — logging stopped. Telemetry continues.");
@@ -1325,11 +1331,36 @@ static_assert(sizeof(SysHealth) == 29, "SysHealth payload must remain 29 bytes")
 
 constexpr uint8_t HEALTH_FLAG_SD_ERROR   = 0x01;
 constexpr uint8_t HEALTH_FLAG_NO_MAG     = 0x02;
+constexpr uint8_t HEALTH_FLAG_TIMER_ANOM = 0x04;  // micros() stepped backwards
+
+// Longest value micros() arithmetic may produce before it is treated as a timer fault
+// rather than a measurement.
+//
+// micros() on Apollo3 is NOT strictly monotonic. Two adjacent calls can return n then
+// n-1: the value is derived from the STIMER through an integer conversion, and a read
+// that straddles the clock-domain boundary can round down. Unsigned subtraction then
+// turns a ONE MICROSECOND backward step into 4 294 967 295 us, and because loopMaxUs is
+// a max-hold, that single glitch poisons the whole 1-second interval.
+//
+// Observed 2026-09-11: a real log reported loop_max_us = 4 294 967 xxx, which the host
+// parser dutifully reported as a "4 294 967 ms loop stall, most likely an I2C stall".
+// There was no stall. The board was running normally.
+//
+// 60 s is chosen because it is unreachable by any real mechanism: the SD write path tops
+// out near 50 ms, an I2C stall with no timeout blocks for as long as the bus is held but
+// would take the heartbeat LED with it, and the genuine micros() rollover at ~71.6 min is
+// handled correctly by unsigned arithmetic and produces a SMALL delta, not a large one.
+// So anything above this can only be a backwards step.
+constexpr uint32_t TIMING_MAX_PLAUSIBLE_US = 60000000UL;
 
 // Per-interval maxima for the health record. loopMaxUs is sampled at the TOP of loop()
 // against the previous pass's entry time, so it measures the full round trip including
 // whatever blocked — which is exactly the quantity a frozen LED is reporting.
 uint32_t loopMaxUs      = 0;
+// Set when a micros() delta exceeded TIMING_MAX_PLAUSIBLE_US, i.e. the timer went
+// backwards. Reported as HEALTH_FLAG_TIMER_ANOM and reset with the maxima it protects,
+// so the host can tell "no stall measured" from "the measurement itself was rejected".
+bool     timerAnomaly   = false;
 uint32_t lastLoopEntryUs = 0;
 unsigned long lastHealthMs = 0;
 
@@ -2227,7 +2258,15 @@ void loop() {
   // longer than the 500 ms heartbeat interval is directly visible as a stall.
   if (lastLoopEntryUs != 0) {
     uint32_t loopUs = (uint32_t)(nowUs - lastLoopEntryUs);
-    if (loopUs > loopMaxUs) loopMaxUs = loopUs;
+    // Reject the impossible rather than max-holding it — see TIMING_MAX_PLAUSIBLE_US.
+    // Discarding is safe in the direction that matters: a real stall is orders of
+    // magnitude below the ceiling, so nothing diagnosable is lost, while keeping the
+    // value would report a 71-minute loop pass on a board that never missed a beat.
+    if (loopUs > TIMING_MAX_PLAUSIBLE_US) {
+      timerAnomaly = true;
+    } else if (loopUs > loopMaxUs) {
+      loopMaxUs = loopUs;
+    }
   }
   lastLoopEntryUs = nowUs;
 
@@ -2813,6 +2852,7 @@ void loop() {
       uint8_t healthFlags = 0;
       if (sdError)    healthFlags |= HEALTH_FLAG_SD_ERROR;
       if (!magPresent) healthFlags |= HEALTH_FLAG_NO_MAG;
+      if (timerAnomaly) healthFlags |= HEALTH_FLAG_TIMER_ANOM;
 
       SysHealth health = {
         loopMaxUs,
@@ -2844,6 +2884,7 @@ void loop() {
     // otherwise print the freshly zeroed values.
     reportedLoopMaxUs  = loopMaxUs;
     loopMaxUs = 0;
+    timerAnomaly = false;
 #if SD_BUFFERED_WRITE
     reportedWriteMaxUs = sdServiceMaxUs;
     sdServiceMaxUs = 0;

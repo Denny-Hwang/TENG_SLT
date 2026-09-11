@@ -120,6 +120,14 @@ STATUS_FLAG_SD_ERROR = 0x01   # bit 0: SD write failure
 # TYPE_SYS_HEALTH flags byte (must match VertiSea.ino)
 HEALTH_FLAG_SD_ERROR = 0x01   # bit 0: SD logging degraded/failed right now
 HEALTH_FLAG_NO_MAG   = 0x02   # bit 1: magnetometer did not initialise at boot
+HEALTH_FLAG_TIMER_ANOM = 0x04 # bit 2: micros() stepped backwards during this interval
+
+# A loop or SD-write time at or above this is not a measurement, it is the firmware's
+# micros() having stepped backwards - unsigned subtraction turns a 1 us backward step into
+# 4 294 967 295 us. Firmware from 2026-09-11 onward rejects these at the source and sets
+# HEALTH_FLAG_TIMER_ANOM instead; the threshold is kept here so logs written by OLDER
+# firmware are still read correctly rather than reported as a 71-minute stall.
+TIMING_IMPLAUSIBLE_US = 60_000_000
 
 # ---------------------------------------------------------------------------
 # SD binary parser — payload byte counts AFTER the 5-byte header
@@ -511,6 +519,7 @@ def parse_binary_file(bin_path: str) -> dict:
                     'flags': v[8],
                     'sd_error': bool(v[8] & HEALTH_FLAG_SD_ERROR),
                     'mag_absent': bool(v[8] & HEALTH_FLAG_NO_MAG),
+                    'timer_anomaly': bool(v[8] & HEALTH_FLAG_TIMER_ANOM),
                 })
 
             # ---- TYPE_RPM (0x0C) — 2 payload bytes ---------------------------------
@@ -617,9 +626,31 @@ def parse_binary_file(bin_path: str) -> dict:
     if data['sys_health']:
         h = data['sys_health']
         span_s = (h[-1]['ts_ms'] - h[0]['ts_ms']) / 1000.0 if len(h) > 1 else 0.0
-        worst_loop = max(r['loop_max_us'] for r in h)
-        worst_write = max(r['sd_write_max_us'] for r in h)
         last = h[-1]
+
+        # Separate timer faults from stalls BEFORE drawing any conclusion from the maxima.
+        # A micros() backward step lands in loop_max_us as ~4.29e9 us, and because the
+        # firmware max-holds, one glitch dominates the whole interval. Reporting that as a
+        # stall sends the reader after an I2C bus that was never stuck, so the implausible
+        # records are excluded from the maxima and reported separately for what they are.
+        n_timer_anom = sum(1 for r in h
+                           if r.get('timer_anomaly')
+                           or r['loop_max_us'] >= TIMING_IMPLAUSIBLE_US
+                           or r['sd_write_max_us'] >= TIMING_IMPLAUSIBLE_US)
+        sane = [r for r in h if r['loop_max_us'] < TIMING_IMPLAUSIBLE_US
+                and r['sd_write_max_us'] < TIMING_IMPLAUSIBLE_US]
+        worst_loop = max((r['loop_max_us'] for r in sane), default=0)
+        worst_write = max((r['sd_write_max_us'] for r in sane), default=0)
+
+        if n_timer_anom:
+            data['errors'].append(
+                f"TIMER ANOMALY in {n_timer_anom} of {len(h)} health records: micros() "
+                "stepped backwards, so the firmware's unsigned subtraction produced "
+                "~4 294 967 295 us (about 4 294 967 ms). That is NOT a loop stall and NOT "
+                "an I2C problem - it is a known Apollo3 quirk where two adjacent micros() "
+                "calls can return n then n-1. Those records are excluded from the maxima "
+                "below. Firmware from 2026-09-11 rejects them at the source; if this log "
+                "predates that, reflash before reading loop_max_us at all.")
 
         data['notes'].append(
             f"Health: {len(h)} records over {span_s:.0f} s; worst loop pass "
@@ -629,9 +660,15 @@ def parse_binary_file(bin_path: str) -> dict:
         # A loop pass longer than the 500 ms heartbeat interval is, by construction, a
         # visible LED freeze. This measures the reported symptom instead of guessing.
         if worst_loop >= 500000:
-            culprit = ("a long SD write (see sd_write_max_us)" if worst_write >= 250000
-                       else "something OTHER than the SD write path - most likely an I2C "
-                            "stall, since no other counter accounts for it")
+            if worst_write >= 250000:
+                culprit = "a long SD write (see sd_write_max_us)"
+            elif last['hall_rejected'] and span_s > 0 and \
+                    last['hall_rejected'] / span_s > 100.0:
+                culprit = ("the Hall interrupt storm below - at that edge rate the ISR "
+                           "runs often enough to starve loop()")
+            else:
+                culprit = ("something OTHER than the SD write path - most likely an I2C "
+                           "stall, since no other counter accounts for it")
             data['errors'].append(
                 f"LOOP STALL: longest loop() pass was {worst_loop / 1000.0:.0f} ms. The "
                 f"heartbeat LED toggles at the end of loop(), so any pass over 500 ms is a "
@@ -654,12 +691,21 @@ def parse_binary_file(bin_path: str) -> dict:
 
         if last['hall_rejected']:
             rate = last['hall_rejected'] / span_s if span_s > 0 else 0.0
+            # 33.3 edges/s is one magnet at RPM_MAX_EXPECTED-adjacent 2000 RPM. Quoting the
+            # ratio rather than the bare count is what makes the number actionable: a
+            # handful of rejects is bounce, two orders of magnitude is a wiring fault.
+            ratio = rate / 33.3 if rate else 0.0
+            verdict = ("This is interference, not bounce" if ratio >= 5.0
+                       else "Low enough to be contact bounce or a marginal magnet gap")
             data['errors'].append(
                 f"HALL EDGE NOISE: {last['hall_rejected']} edges rejected by the ISR as "
-                f"implausibly fast ({rate:.1f}/s average). A real rotor at 2000 RPM gives "
-                "~33 edges/s and none are rejected, so a non-zero count is electrical "
-                "interference on the Hall line - check shielding and routing away from "
-                "the harvester.")
+                f"implausibly fast ({rate:.1f}/s average). A real rotor at 2000 RPM with "
+                f"one magnet gives ~33 edges/s, so this is {ratio:.0f}x the maximum "
+                f"mechanically possible rate. {verdict}. Every rejected edge still costs "
+                "an interrupt, so the RPM channel is unusable AND loop() is paying for it. "
+                "Fix at the wiring: shield the Hall line, route it away from the harvester "
+                "output and its return, and add an RC at the sensor pin. Setting "
+                "RPM_ENABLE 0 removes the load but not the noise.")
 
         if last['hall_lost']:
             data['errors'].append(
@@ -708,7 +754,7 @@ _CSV_SCHEMAS = {
                                  'sd_write_failures', 'sd_recoveries',
                                  'hall_rejected', 'hall_lost',
                                  'sd_queue_high_water', 'sd_overruns',
-                                 'sd_error', 'mag_absent')),
+                                 'sd_error', 'mag_absent', 'timer_anomaly')),
     'lpf_cal':   ('lpfCal',   ('ts_ms', 'alpha_acc', 'alpha_gyro', 'alpha_mag',
                                'accel_cutoff_hz', 'gyro_cutoff_hz',
                                'mag_cutoff_hz', 'imu_rate_hz',
