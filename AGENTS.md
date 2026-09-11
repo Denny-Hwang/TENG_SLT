@@ -89,9 +89,14 @@ modified under this strategy.
 ## Coding conventions
 
 ### Arduino / C++ (`VertiSea.ino`)
-- Target board: **SparkFun RedBoard Artemis Nano** (Apollo3). Arduino IDE with the
-  SparkFun Apollo3 boards package. Not a Teensy — Apollo3-specific behaviour matters
-  (e.g. the SVL bootloader leaves residual bytes in the UART TX FIFO at boot).
+- Target board: **SparkFun RedBoard Artemis Nano** (Apollo3), **boards package 1.2.1**.
+  Not a Teensy — Apollo3-specific behaviour matters (e.g. the SVL bootloader leaves
+  residual bytes in the UART TX FIFO at boot).
+- **Core 1.2.1 is a hard requirement, not a preference.** Core 2.x is mbed-OS based: it
+  compiles cleanly and then panics on the first Hall edge, because mbed's `micros()` takes
+  a mutex and `hallISR()` calls it (Issue 59). The sketch has a `#error` guard on
+  `ARDUINO_ARCH_MBED`; do not remove or bypass it without fixing the ISR first. Every
+  timing figure in `docs/` was measured on 1.2.1 and is not comparable to a 2.x build.
 - C++11 or later; use `constexpr`, lambdas, and `struct` with designated initializers freely.
 - All packet structs are `__attribute__((packed))`. Do not add padding or change field order
   without updating `docs/binary_protocol.md` AND `vertisea_plot_v7.py` simultaneously.

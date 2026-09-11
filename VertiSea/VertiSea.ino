@@ -170,6 +170,36 @@
 #include "MadgwickAHRS.h"
 
 // =============================================================================
+//  BOARD-SUPPORT CORE GUARD
+// =============================================================================
+// This firmware targets SparkFun Apollo3 core 1.2.1 — the bare Arduino core. Core 2.x is
+// built on mbed OS and is NOT a drop-in: it compiles cleanly and then fails at run time,
+// which cost a full day of hardware debugging before this guard existed (Issue 59).
+//
+// The fatal difference is that mbed OS forbids RTOS primitives in interrupt context, and
+// its `micros()` takes a mutex:
+//
+//     ++ MbedOS Error Info ++
+//     Error Message: Mutex: 0x100033BC, Not allowed in ISR context
+//
+// hallISR() calls micros() as its first statement, so on core 2.x the board panics on the
+// FIRST Hall edge — about a second into loop(). The observable result is not an obvious
+// crash: the SD file contains only the 196 bytes of boot records, no telemetry is ever
+// sent, and the LED keeps blinking because the mbed error handler blinks it. Everything
+// looks nearly healthy while nothing works.
+//
+// Other 2.x divergences found alongside it: `Serial` / `Serial1` map differently (Serial1
+// telemetry surfaces on the USB port), and analogRead/attachInterrupt semantics differ —
+// so even a 2.x build that ran would not produce timing numbers comparable to anything in
+// docs/.
+//
+// To build on 2.x anyway, define ALLOW_MBED_CORE and fix hallISR() first: read the Apollo3
+// STIMER directly instead of calling micros(), or set RPM_ENABLE 0 to compile the ISR out.
+#if defined(ARDUINO_ARCH_MBED) && !defined(ALLOW_MBED_CORE)
+  #error "Apollo3 core 2.x (mbed) detected. This firmware requires core 1.2.1 - on 2.x, micros() in hallISR() panics the kernel on the first Hall edge (IDENTIFIED_ISSUES.md Issue 59). Remove any manual core checkout from the sketchbook hardware/ folder and install SparkFun Apollo3 1.2.1 via the Boards Manager. To override deliberately, define ALLOW_MBED_CORE."
+#endif
+
+// =============================================================================
 //  DEPLOYMENT FLAGS — edit these before flashing
 // =============================================================================
 

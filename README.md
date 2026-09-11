@@ -146,8 +146,31 @@ Manager copy — if you have one in your sketchbook `libraries/` folder, remove 
 > [`archived/Madgwick-upstream/`](archived/Madgwick-upstream/).
 
 Board: **SparkFun RedBoard Artemis Nano**. Install the SparkFun Apollo3 boards package
-(core 1.2.1) via the Boards Manager URL
-`https://raw.githubusercontent.com/sparkfun/Arduino_Apollo3/main/package_sparkfun_apollo3_index.json`.
+via the Boards Manager and select **version 1.2.1**.
+
+> ### ⚠ Core 1.2.1 is required — 2.x compiles and then fails on hardware
+>
+> Apollo3 core 2.x is built on mbed OS and is **not** a drop-in. mbed forbids RTOS
+> primitives in interrupt context and its `micros()` takes a mutex, so `hallISR()` panics
+> the kernel on the first Hall edge, about a second into `loop()`:
+>
+> ```
+> ++ MbedOS Error Info ++
+> Error Message: Mutex: 0x100033BC, Not allowed in ISR context
+> ```
+>
+> The failure does not look like a crash. The `.BIN` file contains only the 196 bytes of
+> boot records, no telemetry is ever sent, and **the LED keeps blinking — because the mbed
+> error handler blinks it**. Everything looks nearly healthy while nothing works.
+> `Serial`/`Serial1` also map differently on 2.x, so telemetry surfaces on the wrong port.
+>
+> The sketch now refuses to build on 2.x with a `#error` naming this. If you see it,
+> delete any manual core checkout from your sketchbook `hardware/` folder and install
+> 1.2.1 through the Boards Manager. See Issue 59.
+
+Check which core you have: the Arduino build log prints the platform folder. A path under
+`Arduino15/packages/SparkFun/hardware/apollo3/1.2.1` is correct; a sketchbook
+`hardware/sparkfun/apollo3` path with `mbed` in the compiler flags is 2.x.
 
 ### Ground Station (Python)
 
@@ -476,6 +499,7 @@ to SD and therefore never appear as CSVs.
 | Sketch will not open | The sketch must live in a folder of the same name: `VertiSea/VertiSea.ino` |
 | LED stopped blinking / stuck on mid-run | Open `<base>_sysHealth.csv`. `loop_max_us` over 500 000 is a stall long enough to freeze the LED, and the other columns say which subsystem caused it. The parser prints the diagnosis in the Load BIN File summary |
 | A deployment produced several `LOGnnnnn.BIN` files | Normal after an SD fault: each recovery opens a new file with a fresh copy of the calibration records. `sd_recoveries` in `_sysHealth.csv` counts them |
+| Everything looks fine but nothing works: LED blinks, `.BIN` is ~196 B, no telemetry | Apollo3 core 2.x. The blink is the mbed error handler, not the heartbeat. Build on core 1.2.1 — see §4 and Issue 59 |
 | Board appears dead at boot | Count the LED pulses: 1 = RTC, 2 = BME280, 3 = stab IMU, 4 = fixed IMU, 5 = SD, 6 = filenames exhausted, 7 = file open. A steady 1 Hz blink means it is running normally; 4 Hz means a latched SD error. There is still no watchdog — a halted board stays halted (Issue 47) |
 | SD card not detected | CS pin is 4; the card must be FAT32 |
 | GPS time sync skipped | `GPS_SYNC_TIMEOUT_MS = 120 000 ms` when `GPS_ENABLE 1`; `GPS_ENABLE 0` skips it entirely |

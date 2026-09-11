@@ -77,6 +77,7 @@ issue is fixed; do not delete resolved entries.
 | 56 | 🟠 High | `current_filter_test.py` | Median-5 main stage cannot reproduce a scope's High-Resolution mode and shifted integrated charge by +2.79% | ✅ Resolved 2026-09-11 |
 | 57 | 🟠 High | `VertiSea.ino` | No watchdog: an I²C stall hangs the board permanently, losing a multi-day deployment | ⚠ Open |
 | 58 | 🔴 Critical | `VertiSea.ino` / `Madgwick/` | Vendored Madgwick sat outside the sketch folder, so Arduino could not see it and silently compiled a global copy with a different `betaDef` | ✅ Resolved 2026-09-11 |
+| 59 | 🔴 Critical | `VertiSea.ino` / toolchain | `hallISR()` calls `micros()`, which is not ISR-safe on Apollo3 core 2.x (mbed) — a single Hall edge panics the kernel | ⚠ Open — build on core 1.2.1 |
 
 ---
 
@@ -2363,3 +2364,71 @@ that retired the MATLAB parser.
 **Action required on the developer's machine:** delete any `Madgwick` / `MadgwickAHRS`
 library from the sketchbook `libraries/` folder. It is now genuinely unnecessary, and
 removing it is the only way to be certain which code is running.
+
+---
+
+### Issue 59 — 🔴 Critical: `micros()` in the Hall ISR panics the kernel on Apollo3 core 2.x
+
+**Status:** ⚠ Open. **The firmware must be built on Apollo3 core 1.2.1.** Confirmed on
+hardware 2026-09-11.
+
+**Where:** `VertiSea/VertiSea.ino`, `hallISR()` — and, more precisely, the choice of
+board-support core.
+
+```
+++ MbedOS Error Info ++
+Error Status: 0x80010133 Code: 307 Module: 1
+Error Message: Mutex: 0x100033BC, Not allowed in ISR context
+Current Thread: main ... tgt=SFE_ARTEMIS_NANO
+```
+
+Apollo3 core **1.x** is a bare Arduino core: `micros()` is a timer read and is safe from an
+interrupt. Core **2.x** is built on mbed OS, where `micros()` goes through an RTOS
+primitive that takes a mutex — and taking a mutex in ISR context is an immediate kernel
+panic, not a degraded reading.
+
+`hallISR()` calls `micros()` as its first statement. On core 2.x the board therefore dies
+on the **first Hall edge after `attachInterrupt()`**, roughly one second into `loop()`.
+
+**Observed consequences, all from this single cause:**
+
+| Symptom | Mechanism |
+|---------|-----------|
+| `.BIN` files contain exactly 196 bytes | the boot records were flushed in `setup()`; the panic arrives before the first 5 s `sdFlushBuffered()`, so the 118 B then sitting in the queue never reach the card |
+| No telemetry at all, on USB or radio | the board is dead ~1 s into `loop()` |
+| Heartbeat LED "blinking at about 1 Hz" | **not** the firmware heartbeat — it is the MbedOS error handler's own blink. This is why the LED looked healthy while nothing worked |
+| Binary bytes interleaved into `USB_DEBUG` text | on core 2.x the `Serial` / `Serial1` mapping differs from 1.x, so `Serial1` telemetry surfaces on the USB port |
+
+**This is almost certainly the original field fault.** The reported symptom was "the
+heartbeat LED stops blinking or sticks on, and it seems to depend on the measurement
+signal." Issue 54 attributed that to harvester EMI on the unshielded Hall line causing an
+interrupt storm that starved `loop()`. The EMI mechanism was right; the consequence was
+badly understated. On core 2.x a *single* induced edge is fatal, and what the operator
+then sees is the mbed error handler's LED pattern replacing the heartbeat — which matches
+"stops blinking / changes to something else" far better than loop starvation does.
+
+The ISR-level rejection added for Issue 54 does **not** help here: `micros()` is called
+before the threshold test, so the panic happens first. That fix remains correct for its own
+purpose (EMI no longer floods the SD pipeline) but it cannot survive a core it was never
+written for.
+
+**Resolution: build on Apollo3 core 1.2.1.** Remove any manual 2.x checkout from the
+sketchbook `hardware/` folder and install 1.2.1 through the Boards Manager. Core 1.2.1 is
+the platform every measurement, timing figure and dead end in `docs/` was recorded against;
+2.x differs in `Serial` mapping, `analogRead`, `attachInterrupt` and the RTOS, so its
+timing numbers would not be comparable even if it ran.
+
+**If core 2.x ever becomes a requirement**, the ISR must stop calling `micros()`. Options,
+in order of preference:
+
+1. Read the Apollo3 STIMER directly (`am_hal_stimer_counter_get()`), which is a register
+   read and ISR-safe on both cores. Needs verification against each core's HAL headers.
+2. Have the ISR only increment `hallPulseCount` and let `loop()` timestamp. Costs up to one
+   loop period (~3 ms) of jitter against a ~30 ms edge period — roughly 10% RPM error — and
+   destroys the point of the raw `TYPE_HALL_EDGE` record, so this is a fallback only.
+3. `RPM_ENABLE 0`, which compiles the ISR out entirely. This is the correct immediate
+   workaround for confirming the diagnosis and for any run that does not need RPM.
+
+**Prevention:** `README.md` §4 stated core 1.2.1 but nothing enforced or checked it, and a
+2.x build compiles cleanly — the divergence only appears at run time. A compile-time guard
+on `ARDUINO_ARCH_MBED` would have turned a day of hardware debugging into a build error.

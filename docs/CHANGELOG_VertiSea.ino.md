@@ -4,6 +4,63 @@ Newest first.
 
 ---
 
+## 2026-09-11 — Refuse to build on Apollo3 core 2.x (mbed): `micros()` in the Hall ISR panics the kernel — `[CONFIRMED 2026-09-11]`
+
+**Status:** `[CONFIRMED 2026-09-11]` — reproduced on hardware; the MbedOS panic was
+captured over USB and the 196-byte `.BIN` files match the predicted failure exactly.
+
+Apollo3 core 1.x is a bare Arduino core where `micros()` is a timer read. Core 2.x is built
+on mbed OS, which forbids RTOS primitives in interrupt context — and its `micros()` takes a
+mutex. `hallISR()` calls `micros()` as its first statement, so on 2.x the board panics on
+the FIRST Hall edge after `attachInterrupt()`, roughly a second into `loop()`:
+
+```
+++ MbedOS Error Info ++
+Error Status: 0x80010133 Code: 307 Module: 1
+Error Message: Mutex: 0x100033BC, Not allowed in ISR context
+```
+
+**What makes this expensive is that it does not look like a crash.** Every observable
+pointed somewhere else:
+
+| Symptom | Real cause |
+|---------|-----------|
+| `.BIN` contains exactly 196 bytes | the boot records were flushed in `setup()`; the panic lands before the first 5 s flush, so the 118 B then queued never reach the card |
+| No telemetry on any port | dead ~1 s into `loop()` |
+| **Heartbeat LED blinking at ~1 Hz** | the *mbed error handler's* blink, not ours — so the one indicator an operator trusts said "healthy" |
+| Binary bytes mixed into the `USB_DEBUG` text | `Serial`/`Serial1` map differently on 2.x, so `Serial1` telemetry surfaces on USB |
+
+Diagnosis took a day of hardware debugging across several wrong hypotheses (telemetry
+routing, library versions, SD wiring) because the code compiled cleanly and the LED looked
+right.
+
+**This is very likely the original field fault.** The report that started this work was
+"the LED stops blinking or sticks on, and it seems to depend on the measurement signal."
+Issue 54 attributed it to harvester EMI on the unshielded Hall line starving `loop()` with
+an interrupt storm. The EMI mechanism was right and the consequence was badly understated:
+on core 2.x a *single* induced edge is fatal, and what the operator sees afterwards is the
+mbed error blink replacing the heartbeat — which fits "stops blinking / changes" far better
+than loop starvation. The Issue 54 ISR threshold does not help, because `micros()` runs
+before the test.
+
+**Change:** a `#error` guard on `ARDUINO_ARCH_MBED`, escapable with `ALLOW_MBED_CORE` for
+anyone who deliberately wants to port. `README.md` §4 and `AGENTS.md` now state that 1.2.1
+is a hard requirement rather than a preference, with the symptom table so the next person
+recognises it in minutes. README also gains a row in "Things That Are Easy to Forget" and
+instructions for telling the two cores apart from the build log.
+
+**Why a guard rather than fixing the ISR:** every timing figure in `docs/` — achieved IMU
+rate, current sample rate, SD write latency, the 400 Hz-vs-1000 Hz experiment — was
+measured on 1.2.1. A 2.x build would not be comparable even if it ran, so making it *run*
+would invite silently incomparable data. Issue 59 records the options if 2.x ever becomes a
+requirement: read the Apollo3 STIMER directly (ISR-safe on both cores), timestamp in
+`loop()` instead (costs ~10% RPM accuracy), or `RPM_ENABLE 0`.
+
+**Verified:** the guard fires under `-DARDUINO_ARCH_MBED`, passes without it, and passes
+with `-DALLOW_MBED_CORE`. No other change to the firmware.
+
+---
+
 ## 2026-09-11 — Move the vendored Madgwick into the sketch folder so it is actually compiled — `[UNCONFIRMED]`
 
 **No behavioural change to the sketch's own code — but potentially a large change to what
