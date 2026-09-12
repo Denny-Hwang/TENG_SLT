@@ -477,8 +477,14 @@ static_assert(BATTERY_CELL_MAX_V / BATTERY_DIV_RATIO < VREF,
 // =============================================================================
 const int     CS_SD   = 4;           // SD card SPI chip-select
 const int     LED_PIN = LED_BUILTIN; // status / heartbeat LED
-const uint8_t A_PIN   = A14;         // current sensor analog output (analog input)
-const uint8_t BATTERY_PIN = A15;     // 1S LiFePO4 divider output (Apollo3 pad 32 / ADC SE4)
+// Both pads verified against the Apollo3 core 1.2.1 Artemis Nano variant table
+// (ap3_variant_pinmap): Arduino pin 14 -> pad 35 (ADC SE7), pin 15 -> pad 32 (ADC SE4).
+// The silkscreen labels are "A14" and "A15". When a bench voltage on one of these reads
+// zero, probe the PAD with a meter against board GND before suspecting the firmware:
+// docs/adc_calibration.md shows both channels tracking a DMM to within 1.5 % on this
+// exact code path, so a zero is a wiring or ground fault until the meter says otherwise.
+const uint8_t A_PIN   = A14;         // current sensor output — pad 35 / ADC SE7, no divider
+const uint8_t BATTERY_PIN = A15;     // 1S LiFePO4 divider output — pad 32 / ADC SE4
 
 // =============================================================================
 //  SERIAL PORT ALIASES
@@ -1361,6 +1367,13 @@ uint32_t loopMaxUs      = 0;
 // backwards. Reported as HEALTH_FLAG_TIMER_ANOM and reset with the maxima it protects,
 // so the host can tell "no stall measured" from "the measurement itself was rejected".
 bool     timerAnomaly   = false;
+
+// Most recent raw conversions from the two ADC channels, kept only so the 1 Hz
+// USB_DEBUG line can show them. On a bench test this is the fastest way to tell "the
+// pin is not seeing the voltage" from "the conversion is wrong": watch the count while
+// touching the probe to the pad.
+uint16_t lastCurrentCounts = 0;
+uint16_t lastBatteryCounts = 0;
 uint32_t lastLoopEntryUs = 0;
 unsigned long lastHealthMs = 0;
 
@@ -1681,12 +1694,16 @@ void hallISR() {
 // and lets an operator read the failure off the board:
 //
 //   1 = RTC        2 = BME280      3 = stabilized IMU   4 = fixed IMU
-//   5 = SD card    6 = log filenames exhausted          7 = log file open failed
+//   5 = (retired)  6 = (retired)   7 = (retired)
 //
-// This still HALTS. Whether a missing BME280 should really end the mission, or whether
-// the firmware should log what it can and set a status flag, is a deployment-policy
-// decision that has not been made — see Issue 47. This only makes the current policy
-// observable.
+// Codes 5-7 were the SD card faults. Since 2026-09-12 an SD fault no longer halts: the
+// firmware runs without logging, blinks the 4 Hz "SD degraded" pattern instead, and
+// keeps telemetry alive (Issue 67 — a card-less bench session for live IMU work was
+// impossible while a missing card ended setup()). The numbers are kept reserved so an
+// operator's notes from an older build still read correctly.
+//
+// The sensor faults 1-4 still HALT. Whether a missing BME280 should really end the
+// mission is the remaining half of the Issue 47 policy decision; SD is now decided.
 static void haltWithBlinkCode(uint8_t code) {
   pinMode(LED_PIN, OUTPUT);
   for (;;) {
@@ -2133,11 +2150,26 @@ void setup() {
   DBG_PRINTLN("*Initializing SD card...");
   // SD 1.3.0's single-argument overload takes the chip-select pin. Its
   // two-argument overload is (clock, csPin), not (csPin, speed).
+  //
+  // A missing or dead card DEGRADES rather than halts (Issue 67). The board runs with
+  // sdError set: every SD path short-circuits on that flag before touching logFile, the
+  // heartbeat switches to the 4 Hz pattern, TYPE_STATUS carries the flag to the ground
+  // station, and telemetry keeps flowing — which is the whole point of a card-less bench
+  // session. Halting here made "connect over USB and watch the IMU live" impossible.
+  //
+  // Remount retries are exhausted deliberately. With no card on the bus, SD.begin()
+  // waits out the library's full 2 s init timeout before failing, and doing that every
+  // SD_RECOVERY_INTERVAL_MS would stall loop() for 2 s in every 5 — freezing the LED,
+  // dropping IMU samples and gapping telemetry, in exactly the session this mode exists
+  // for. A card inserted later needs a reset, which is also what SPI SD requires anyway.
   if (!SD.begin(CS_SD)) {
-    DBG_PRINTLN("SD card failed!");
-    haltWithBlinkCode(5);
+    DBG_PRINTLN("SD card not found - running WITHOUT logging (telemetry only).");
+    DBG_PRINTLN("Insert a card and reset to log.");
+    setSdError("SD absent at boot");
+    sdRecoveryAttempts = SD_MAX_RECOVERY_ATTEMPTS;
+  } else {
+    DBG_PRINTLN("SD card OK");
   }
-  DBG_PRINTLN("SD card OK");
 
   // Filename strategy (fixes IDENTIFIED_ISSUES #2):
   //   1. With valid local time, prefer MMDDHHmm.BIN when that name is unused.
@@ -2154,7 +2186,9 @@ void setup() {
   char fname[20] = {0};
   bool filenameFound = false;
 
-  if (localTimeValid) {
+  if (sdError) {
+    // No card: nothing to name or open. Fall through to the rest of setup().
+  } else if (localTimeValid) {
     snprintf(fname, sizeof(fname), "%02d%02d%02d%02d.BIN",
              localMonth,
              localDay,
@@ -2173,7 +2207,7 @@ void setup() {
     DBG_PRINTLN("Local time not valid (year < 2024) — using counter-based log filename.");
   }
 
-  if (!filenameFound) {
+  if (!sdError && !filenameFound) {
     for (uint32_t n = 1; n <= 99999UL; n++) {
       snprintf(fname, sizeof(fname), "LOG%05lu.BIN", n);
       if (!SD.exists(fname)) {
@@ -2183,18 +2217,27 @@ void setup() {
     }
   }
 
-  if (!filenameFound) {
-    DBG_PRINTLN("FATAL: no unused SD log filename remains; refusing to overwrite data.");
-    haltWithBlinkCode(6);
+  if (!sdError && !filenameFound) {
+    // Refusing to overwrite is the data-safety rule; refusing to RUN is not required to
+    // honour it. Degrade with retries exhausted — a remount cannot free a name.
+    DBG_PRINTLN("No unused SD log filename remains; refusing to overwrite data.");
+    DBG_PRINTLN("Running WITHOUT logging. Clear the card and reset.");
+    setSdError("SD filenames exhausted");
+    sdRecoveryAttempts = SD_MAX_RECOVERY_ATTEMPTS;
   }
 
-  logFile = SD.open(fname, FILE_WRITE);
-  if (!logFile) {
-    DBG_PRINTLN("Failed to open log file!");
-    haltWithBlinkCode(7);
+  if (!sdError) {
+    logFile = SD.open(fname, FILE_WRITE);
+    if (!logFile) {
+      // The card mounted but would not open a file. Leave the recovery machine armed:
+      // this is the kind of fault a remount and a fresh counter name can clear.
+      DBG_PRINTLN("Failed to open log file - running WITHOUT logging, will retry.");
+      setSdError("SD log file open failed");
+    } else {
+      snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
+      DBG_PRINT("Logging to "); DBG_PRINTLN(fname);
+    }
   }
-  snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
-  DBG_PRINT("Logging to "); DBG_PRINTLN(fname);
 
   // ---- IIR filter coefficients --------------------------------------------
   // alpha = dt / (rc + dt),  rc = 1 / (2π·f_cutoff)
@@ -2226,7 +2269,9 @@ void setup() {
   rtcBootPayload[4] = localMin;
   rtcBootPayload[5] = localSec;
 
-  sdWriteBootRecords();
+  // Every sdAppendRecord() inside returns false on sdError before touching logFile, so
+  // this is safe to call regardless; skipping it just keeps the debug output honest.
+  if (!sdError) sdWriteBootRecords();
 
   // ---- Hall-effect RPM sensor -----------------------------------------------
 #if RPM_ENABLE
@@ -2318,6 +2363,7 @@ void loop() {
     }
 
     uint16_t counts = analogRead(A_PIN);
+    lastCurrentCounts = counts;
 
     // ---- Window statistics ----
     // dt is the MEASURED wall interval since the previous SAMPLE (tracked
@@ -2380,6 +2426,7 @@ void loop() {
     (void)analogRead(BATTERY_PIN);
     uint16_t batteryCounts = analogRead(BATTERY_PIN);
     (void)analogRead(A_PIN);
+    lastBatteryCounts = batteryCounts;
 
     if (!sdError) {
       sdAppendRecord(TYPE_BATTERY_VOLTAGE, nowMs, batteryCounts);
@@ -2913,8 +2960,13 @@ void loop() {
     DBG_PRINT("B high="); DBG_PRINT(sdQueueHighWater);
     DBG_PRINT(" loopUs="); DBG_PRINT(reportedLoopMaxUs);
     DBG_PRINT(" maxWriteUs="); DBG_PRINT(reportedWriteMaxUs);
-    DBG_PRINT(" overruns="); DBG_PRINTLN(sdQueueOverruns);
+    DBG_PRINT(" overruns="); DBG_PRINT(sdQueueOverruns);
 #endif
+    // Raw ADC counts, 14-bit. Expected on the bench: V_pad / VREF * 16383, so 1.20 V on
+    // A14 is ~9 970 and 3.30 V through the A15 divider is ~13 690. A steady 0 with a
+    // supply attached means the pad is not at that voltage — probe it.
+    DBG_PRINT(" A14="); DBG_PRINT(lastCurrentCounts);
+    DBG_PRINT(" A15="); DBG_PRINTLN(lastBatteryCounts);
   }
 
   // ---- 1 Hz system status telemetry (radio) --------------------------------

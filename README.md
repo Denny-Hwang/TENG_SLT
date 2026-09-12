@@ -278,8 +278,12 @@ Only needed for `Calibration/calibrateMag.m` (R2019b or later, no toolboxes).
 **At boot**, the firmware:
 - Initialises every sensor. A magnetometer failure is tolerated (nothing reads it in the
   6-DOF configuration). Any **other** sensor failure still halts the board permanently,
-  now blinking a diagnostic pulse count on the LED: 1 = RTC, 2 = BME280, 3 = stabilized
-  IMU, 4 = fixed IMU, 5 = SD card, 6 = log filenames exhausted, 7 = log file open failed.
+  blinking a diagnostic pulse count on the LED: 1 = RTC, 2 = BME280, 3 = stabilized
+  IMU, 4 = fixed IMU.
+- **An SD fault does not halt.** A missing, dead or full card leaves the board running
+  without logging: the LED blinks at 4 Hz instead of 1 Hz, `TYPE_STATUS` carries the SD
+  flag to the ground station, and telemetry keeps flowing. This is what makes a card-less
+  bench session (live IMU over USB) possible. A card inserted after boot needs a reset.
 - Attempts GPS time sync for up to 120 s when `GPS_ENABLE 1`; skipped entirely when `0`.
   The RTC retains time from the previous power cycle if GPS is unavailable.
 - Creates a log file `MMDDHHMM.BIN` on the SD card. If that name already exists, or the RTC
@@ -500,7 +504,9 @@ to SD and therefore never appear as CSVs.
 | LED stopped blinking / stuck on mid-run | Open `<base>_sysHealth.csv`. `loop_max_us` over 500 000 is a stall long enough to freeze the LED, and the other columns say which subsystem caused it. The parser prints the diagnosis in the Load BIN File summary |
 | A deployment produced several `LOGnnnnn.BIN` files | Normal after an SD fault: each recovery opens a new file with a fresh copy of the calibration records. `sd_recoveries` in `_sysHealth.csv` counts them |
 | Everything looks fine but nothing works: LED blinks, `.BIN` is ~196 B, no telemetry | Apollo3 core 2.x. The blink is the mbed error handler, not the heartbeat. Build on core 1.2.1 — see §4 and Issue 59 |
-| Board appears dead at boot | Count the LED pulses: 1 = RTC, 2 = BME280, 3 = stab IMU, 4 = fixed IMU, 5 = SD, 6 = filenames exhausted, 7 = file open. A steady 1 Hz blink means it is running normally; 4 Hz means a latched SD error. There is still no watchdog — a halted board stays halted (Issue 47) |
+| Board appears dead at boot | Count the LED pulses: 1 = RTC, 2 = BME280, 3 = stab IMU, 4 = fixed IMU. A steady 1 Hz blink means it is running normally; **4 Hz means running without SD** — no card at boot, a full card, or a write failure — and telemetry still works. Solid ON means it is still inside `setup()`. There is still no watchdog — a halted board stays halted (Issue 47) |
+| Live telemetry over the buoy's own USB port shows N/A everywhere | Build with `TELEM_ENABLE 1`, `USB_TELEM 1` **and `USB_DEBUG 0`**. With `USB_DEBUG 1` the USB port carries debug text and packets go to `Serial1`. Confirmed on hardware 2026-09-12: flipping only `USB_DEBUG` from 1 to 0 turned every field live |
+| Bench voltage on A14 or A15 reads zero | Probe the **pad** (A14 = Apollo3 pad 35, A15 = pad 32) against board GND with a meter while the `USB_DEBUG` line prints `A14=`/`A15=` counts. Expected: `V_pad / 1.97 × 16383`. If the meter does not see the voltage, it is wiring or a missing supply ground; the ADC path itself tracks a DMM to 1.5 % ([`docs/adc_calibration.md`](docs/adc_calibration.md)) |
 | SD card not detected | CS pin is 4; the card must be FAT32 |
 | GPS time sync skipped | `GPS_SYNC_TIMEOUT_MS = 120 000 ms` when `GPS_ENABLE 1`; `GPS_ENABLE 0` skips it entirely |
 | GPS shows no fix during deployment | Expected — the antenna sits at water level on a rocking buoy. GPS exists to set the RTC, not for positioning; logging is unaffected |

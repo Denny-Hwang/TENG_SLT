@@ -308,18 +308,22 @@ class VertiSeaGUI:
             "That looks like the buoy, not the radio",
             f"{port} is a CH340 bridge — the USB port on the buoy itself, not the "
             f"RFD900x ground modem.\n\n"
-            "Two things follow:\n\n"
-            "1. Opening it can RESET the board. The CH340E RTS line drives the Artemis "
-            "reset pin. This program holds RTS/DTR low, but the Windows CH340 driver "
-            "still changes the line state on open and on close, and a reset pulse can "
-            "get through. A reset mid-log restarts millis(), starts a new file, and "
-            "stops the heartbeat LED while setup() runs (LED solid ON).\n\n"
+            "BENCH SESSION (live IMU over USB, no SD card, nothing being logged)?\n"
+            "Then this is the right port — click OK. It needs firmware built with "
+            "TELEM_ENABLE 1, USB_TELEM 1 and USB_DEBUG 0, from 2026-09-12 or later "
+            "(older builds halt in setup() when no card is present and never send "
+            "anything).\n\n"
+            "LOGGING RUN in progress? Then Cancel:\n\n"
+            "1. Opening this port can RESET the board. The CH340E RTS line drives the "
+            "Artemis reset pin. This program holds RTS/DTR low, but the Windows CH340 "
+            "driver still changes the line state on open and on close, and a reset "
+            "pulse can get through — restarting millis(), starting a new file, and "
+            "holding the LED solid while setup() runs.\n\n"
             "2. Unless the firmware was built with USB_TELEM 1 and USB_DEBUG 0, this "
-            "port carries debug TEXT, not telemetry packets — every field will read "
-            "N/A no matter how long you wait.\n\n"
-            "Connect to the RFD900x modem instead, or use \"Load BIN File\" to read the "
-            "SD log, which needs no serial connection at all.\n\n"
-            "Open it anyway?")
+            "port carries debug TEXT, not telemetry packets — every field reads N/A "
+            "no matter how long you wait.\n\n"
+            "For a logging run, connect to the RFD900x modem, or use \"Load BIN File\" "
+            "to read the SD log with no serial connection at all.")
 
     def connect_serial(self):
         port = self.port_var.get()

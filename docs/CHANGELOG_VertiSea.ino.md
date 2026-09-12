@@ -4,6 +4,33 @@ Newest first.
 
 ---
 
+## 2026-09-12 — An SD fault degrades instead of halting; pad numbers and raw ADC counts in the debug line — `[UNCONFIRMED]`
+
+**SD never halts setup() any more (Issue 67).** `SD.begin()` failure, filename exhaustion and
+log-file-open failure — the former blink codes 5, 6, 7 — now set `sdError` and continue. The
+degraded mode already existed for a mid-run failure (every SD path short-circuits on the
+flag, the LED goes to 4 Hz, `TYPE_STATUS` carries it); only the boot path refused to use it,
+which made a card-less live-IMU session over USB impossible: the board never reached
+`loop()`, so it never sent a packet.
+
+No-card and names-exhausted set `sdRecoveryAttempts = SD_MAX_RECOVERY_ATTEMPTS` so the
+remount machine stays quiet: with nothing on the bus `SD.begin()` burns its full 2 s init
+timeout per attempt, and one of those every 5 s would freeze the LED and gap the IMU in
+exactly the session this is for. Open-failed leaves retries armed, since a remount and a
+fresh counter name can clear it. `sdWriteBootRecords()` is skipped when degraded. Codes 5–7
+are retired, not renumbered.
+
+**Pads stated at the pin definitions (Issue 66).** `A14` is Apollo3 pad 35 / ADC SE7, `A15`
+is pad 32 / ADC SE4, verified against the core 1.2.1 Artemis Nano variant table. A bench
+reading of zero on a pin with a supply attached is a wiring question first, and the comment
+now says where to put the meter.
+
+**`A14=` / `A15=` raw counts on the 1 Hz `USB_DEBUG` line**, from two new globals
+`lastCurrentCounts` / `lastBatteryCounts`, so a bench voltage can be watched live instead of
+logged, parsed and plotted to discover it never arrived.
+
+---
+
 ## 2026-09-11 (later) — Reject impossible micros() deltas instead of max-holding them — `[UNCONFIRMED]`
 
 A real log reported `loop_max_us` = 4 294 967 295, i.e. `UINT32_MAX`, which the host parser

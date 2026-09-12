@@ -1985,7 +1985,8 @@ disabled, rather than writing zeros. If 9-DOF is re-enabled, restore both.
 
 ### Issue 47 — 🟡 Medium: every sensor init failure halts the board with no watchdog
 
-**Status:** Open, found by the 2026-09-11 code review.
+**Status:** Open for the four sensor faults. **Decided for SD on 2026-09-12: degrade, never
+halt** — see Issue 67. Codes 5–7 are retired.
 
 **Where:** `VertiSea/VertiSea.ino`, `setup()` — RTC, BME280, both IMUs, magnetometer, SD, and
 the filename-exhaustion path all end in `while (1);`. `while (!imuStab.getDeviceReset());` and
@@ -2692,3 +2693,101 @@ count tracks the harvester, the path is established.
 
 The parser now states the ratio to the mechanical maximum rather than a bare count, and calls
 interference by name above 5×.
+
+
+---
+
+### Issue 66 — 🟡 Medium: bench test — A14 read zero with 1.2 V "applied"; the ADC path is not the reason
+
+**Found:** 2026-09-12, capture `09111727.BIN`. Two bench supplies: 3.3 V on the battery
+divider input, 1.1–1.3 V "on the current measurement pin".
+
+**What the log shows.**
+
+| channel | 0–22 s | 22–48 s |
+|---|---|---|
+| A14 (current) | mean 35 counts, **65 % exact zeros**, spikes to ~500 (≈ 0–6 mA) | **exactly 0, every sample** |
+| A15 (battery) | ≈ 0 (divider input open, pulled down by R_bottom) | **13 600 counts = 3.28 V**, then scatter 8 199–16 383 |
+
+1.2 V on A14 should read `1.2 / 1.972 × 16383 ≈ 9 970` counts. It never did. The first 22 s
+is the signature of an **open input** — a floating pad picking up noise, mostly at or below
+ground — and after 22 s the pad is **held at or below 0 V**. Neither is "a voltage was
+applied and mis-converted".
+
+**Why the firmware is not the suspect.**
+
+* The pad identities are verified against the Apollo3 core 1.2.1 Artemis Nano variant table:
+  Arduino pin 14 → pad 35 (ADC SE7), pin 15 → pad 32 (ADC SE4). Both are valid ADC pads and
+  both are the silkscreen labels `A14` / `A15`.
+* `docs/adc_calibration.md` records this exact code path tracking a DMM on **A14 at 93 mV,
+  1 028 mV and 1 864 mV** to within 1.5 %. The channel converts applied voltages correctly.
+* The 2026-09-03 capture shows a clean 125 mA discharge on the same pin with the sensor.
+* The battery channel in this same run reads **3.28 V for a 3.30 V input** through the
+  1.998 divider with the 1.977 V effective reference — 0.7 % error. The ADC, the reference
+  and the conversion arithmetic are all working in this very log.
+
+So a hard zero on A14 means the pad was not at 1.2 V. The most common bench causes, in
+order: the second supply's negative terminal not returned to board GND (a supply with no
+ground path is not a voltage at the pad — it floats, which is the first 22 s); the supply
+output disabled; the probe on a neighbouring pad; or the supply reversed, which would hold
+the pad below ground — which is what the hard zero looks like, and which the pad's ESD
+diode does not enjoy.
+
+**The battery scatter is not the ADC either.** The first six seconds after the 3.3 V supply
+was attached read 13 561–13 639 (±0.3 %). The 8 199–16 383 scatter begins at ~31 s, which is
+when the second supply was being handled: a moving ground or an open clip on a 49 kΩ source
+impedance node will do exactly that. A 0.1 µF across R_bottom would make the node immune to
+it, and would also help the Apollo3 ADC's short sample window, but it was not the cause here.
+
+**Fix / what was done.** No firmware bug to fix. The pad numbers are now stated at the pin
+definitions, and the 1 Hz `USB_DEBUG` line prints `A14=` and `A15=` raw counts so a bench
+test can be read live: touch the probe to the pad and watch the count. The decisive test is a
+meter on the pad against board GND while that line runs — if the meter sees 1.2 V and the
+count is 0, reopen this issue; otherwise it is the wiring.
+
+**Bonus control result.** This bench run had the harvester stopped and shows
+`hall_rejected = 0` over 48 s, against 94 691 with the harvester running (Issue 65). That is
+the harvester-off half of the comparison proposed there, and it points at the harvester.
+IMU rate in this log: 98.4 Hz (mean interval 10 167 µs) on core 1.2.1 — Issue 34's ~93 Hz
+figure confirmed in the right range.
+
+---
+
+### Issue 67 — 🟠 High: a missing SD card halted setup(), which made card-less USB sessions impossible
+
+**Found:** 2026-09-12 — "IMU 실시간으로 보려고 SD 카드없이 시리얼로 바로 연결".
+
+`setup()` ran `SD.begin()` and, on failure, `haltWithBlinkCode(5)`. The board never reached
+`loop()`, so `TELEM_SERIAL` never carried a packet, so the GUI showed N/A in every field —
+indistinguishable from the wrong-port and wrong-build failures, and at the very moment the
+operator wanted to watch the IMU live without a card in the slot.
+
+This was the SD half of the Issue 47 policy question, and the user's workflow decides it:
+**an SD fault degrades; it never halts.** Every SD write path already short-circuits on
+`sdError` before touching `logFile` (`sdAppendRecord`, `sdFlushBuffered`,
+`sdServiceOneSector` all return early), the heartbeat already switches to 4 Hz on `sdError`,
+and `TYPE_STATUS` already carries the flag — the degraded mode existed for a mid-run failure
+and only the boot path refused to use it.
+
+**Fix.** `setup()` now sets `sdError` and continues on any of the three former halts:
+
+| former code | fault | now |
+|---|---|---|
+| 5 | `SD.begin()` failed (no card / dead card) | degrade, **retries exhausted** |
+| 6 | every `LOGnnnnn.BIN` name taken | degrade, retries exhausted — a remount cannot free a name; refusing to overwrite is the rule, refusing to run is not needed to honour it |
+| 7 | card mounted but `SD.open()` failed | degrade, **retries armed** — a remount and a fresh counter name can clear this |
+
+Retries are exhausted deliberately for the no-card case. With nothing on the bus,
+`SD.begin()` waits out the SD library's full 2 s init timeout before failing; retrying every
+`SD_RECOVERY_INTERVAL_MS` (5 s) would stall `loop()` for 2 s in every 5 — freezing the LED,
+dropping IMU samples and gapping telemetry, in precisely the session this mode exists for. A
+card inserted later needs a reset, which SPI SD requires in practice anyway.
+
+`sdWriteBootRecords()` is skipped when degraded (it would drop every record harmlessly, but
+skipping keeps the debug output honest). Codes 5–7 are retired, not renumbered, so an
+operator's notes from an older build still read correctly.
+
+**Confirmed on hardware, same day:** with a card present and `USB_DEBUG 0`, `USB_TELEM 1`,
+`TELEM_ENABLE 1`, live telemetry on the buoy's own USB port populated every field — the N/A
+seen earlier was `USB_DEBUG 1` routing packets to `Serial1`. The card-less path is the
+remaining `[UNCONFIRMED]` piece: it needs one boot with the slot empty and the 4 Hz LED.

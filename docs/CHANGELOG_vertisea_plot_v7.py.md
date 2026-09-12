@@ -4,6 +4,19 @@ Newest first.
 
 ---
 
+## 2026-09-12 — Buoy-port dialog leads with the bench case — `[CONFIRMED]` for the build recipe
+
+The CH340 confirmation added on 2026-09-11 was written for the logging-run hazard and read as
+a warning-only. Its second point was **confirmed on hardware the next day**: with
+`TELEM_ENABLE 1`, `USB_TELEM 1` and `USB_DEBUG 0`, live telemetry on the buoy's own USB port
+populated every field, and the earlier all-N/A display was `USB_DEBUG 1` routing packets to
+`Serial1`. That makes the buoy port a legitimate, routinely used target for bench work, so
+the dialog now opens with that case and says "click OK", states the three flags and the
+2026-09-12 firmware requirement for a card-less session (older builds halt in `setup()`
+without a card — Issue 67), and only then gives the logging-run reasons to Cancel.
+
+---
+
 ## 2026-09-11 (later) — Warn before opening the buoy's own USB port — `[UNCONFIRMED]`
 
 Reported symptom: the GUI was started, connected to COM7, showed N/A in every field — and

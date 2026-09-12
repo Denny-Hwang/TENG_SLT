@@ -5,6 +5,26 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-12 — Bench test: A14 zero is wiring, battery channel correct, SD no longer halts
+
+Bench supplies on both ADC channels (`09111727.BIN`): the battery channel read **3.28 V for
+3.30 V** through the divider (0.7 %); the current channel read a floating input, then a hard
+zero — it never saw the 1.2 V. Pad identities verified against the core 1.2.1 variant table
+(A14 = pad 35, A15 = pad 32); the channel is documented tracking a DMM to 1.5 % on this exact
+path. The decisive next step is a meter on the pad. Issue 66.
+
+Same run, harvester stopped: `hall_rejected = 0` over 48 s, against 94 691 with it running.
+That is the control half of Issue 65 and it points at the harvester. IMU rate 98.4 Hz on core
+1.2.1.
+
+A missing SD card no longer halts `setup()` — it degrades to the existing 4 Hz / telemetry-
+only mode, which is what a card-less live-IMU session needs. Issue 67; Issue 47 decided for SD.
+
+Confirmed on hardware: `USB_DEBUG 0` + `USB_TELEM 1` + `TELEM_ENABLE 1` gives live telemetry
+on the buoy's own USB port. The GUI's buoy-port dialog now leads with that recipe.
+
+---
+
 ## 2026-09-11 (later) — Health diagnostics told the truth about the wrong thing
 
 Two findings from the first real `_sysHealth.csv`, and a fix to the diagnostic that reported
