@@ -796,6 +796,38 @@ uint32_t currentDropped = 0;     // sample ticks missed in THIS window (diagnost
 // =============================================================================
 //  BUFFERED SD PIPELINE STATE
 // =============================================================================
+// Declared ahead of BOTH users and OUTSIDE #if SD_BUFFERED_WRITE. The first use is
+// sdServiceOneSector() below, but loop()'s round-trip timer and the health record use
+// them too and neither is inside that guard - so declaring them next to sdServiceMaxUs
+// would break an SD_BUFFERED_WRITE 0 build. C++ needs a declaration before use and the
+// Arduino prototype generator forward-declares functions only, never variables, so a
+// definition further down the file is invisible up here. That was the
+// "'TIMING_MAX_PLAUSIBLE_US' was not declared in this scope" build error.
+// Longest value micros() arithmetic may produce before it is treated as a timer fault
+// rather than a measurement.
+//
+// micros() on Apollo3 is NOT strictly monotonic. Two adjacent calls can return n then
+// n-1: the value is derived from the STIMER through an integer conversion, and a read
+// that straddles the clock-domain boundary can round down. Unsigned subtraction then
+// turns a ONE MICROSECOND backward step into 4 294 967 295 us, and because loopMaxUs is
+// a max-hold, that single glitch poisons the whole 1-second interval.
+//
+// Observed 2026-09-11: a real log reported loop_max_us = 4 294 967 xxx, which the host
+// parser dutifully reported as a "4 294 967 ms loop stall, most likely an I2C stall".
+// There was no stall. The board was running normally.
+//
+// 60 s is chosen because it is unreachable by any real mechanism: the SD write path tops
+// out near 50 ms, an I2C stall with no timeout blocks for as long as the bus is held but
+// would take the heartbeat LED with it, and the genuine micros() rollover at ~71.6 min is
+// handled correctly by unsigned arithmetic and produces a SMALL delta, not a large one.
+// So anything above this can only be a backwards step.
+constexpr uint32_t TIMING_MAX_PLAUSIBLE_US = 60000000UL;
+
+// Set when a micros() delta exceeded TIMING_MAX_PLAUSIBLE_US, i.e. the timer went
+// backwards. Reported as HEALTH_FLAG_TIMER_ANOM and reset with the maxima it protects,
+// so the host can tell "no stall measured" from "the measurement itself was rejected".
+bool     timerAnomaly   = false;
+
 #if SD_BUFFERED_WRITE
 uint8_t sdQueue[SD_QUEUE_BYTES];             // complete queued log bytes
 uint8_t sdProducer[SD_SECTOR_BYTES];         // record assembly / partial sector
@@ -1378,34 +1410,10 @@ constexpr uint8_t HEALTH_FLAG_SD_ERROR   = 0x01;
 constexpr uint8_t HEALTH_FLAG_NO_MAG     = 0x02;
 constexpr uint8_t HEALTH_FLAG_TIMER_ANOM = 0x04;  // micros() stepped backwards
 
-// Longest value micros() arithmetic may produce before it is treated as a timer fault
-// rather than a measurement.
-//
-// micros() on Apollo3 is NOT strictly monotonic. Two adjacent calls can return n then
-// n-1: the value is derived from the STIMER through an integer conversion, and a read
-// that straddles the clock-domain boundary can round down. Unsigned subtraction then
-// turns a ONE MICROSECOND backward step into 4 294 967 295 us, and because loopMaxUs is
-// a max-hold, that single glitch poisons the whole 1-second interval.
-//
-// Observed 2026-09-11: a real log reported loop_max_us = 4 294 967 xxx, which the host
-// parser dutifully reported as a "4 294 967 ms loop stall, most likely an I2C stall".
-// There was no stall. The board was running normally.
-//
-// 60 s is chosen because it is unreachable by any real mechanism: the SD write path tops
-// out near 50 ms, an I2C stall with no timeout blocks for as long as the bus is held but
-// would take the heartbeat LED with it, and the genuine micros() rollover at ~71.6 min is
-// handled correctly by unsigned arithmetic and produces a SMALL delta, not a large one.
-// So anything above this can only be a backwards step.
-constexpr uint32_t TIMING_MAX_PLAUSIBLE_US = 60000000UL;
-
 // Per-interval maxima for the health record. loopMaxUs is sampled at the TOP of loop()
 // against the previous pass's entry time, so it measures the full round trip including
 // whatever blocked — which is exactly the quantity a frozen LED is reporting.
 uint32_t loopMaxUs      = 0;
-// Set when a micros() delta exceeded TIMING_MAX_PLAUSIBLE_US, i.e. the timer went
-// backwards. Reported as HEALTH_FLAG_TIMER_ANOM and reset with the maxima it protects,
-// so the host can tell "no stall measured" from "the measurement itself was rejected".
-bool     timerAnomaly   = false;
 
 // Most recent raw conversions from the two ADC channels, kept only so the 1 Hz
 // USB_DEBUG line can show them. On a bench test this is the fastest way to tell "the

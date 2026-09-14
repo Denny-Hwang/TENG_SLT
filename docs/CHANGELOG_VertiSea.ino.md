@@ -4,6 +4,31 @@ Newest first.
 
 ---
 
+## 2026-09-14 (fix) — `TIMING_MAX_PLAUSIBLE_US` / `timerAnomaly` were declared below their first user — `[CONFIRMED broken]`
+
+Build error from hardware:
+
+```
+VertiSea.ino:1020:19: error: 'TIMING_MAX_PLAUSIBLE_US' was not declared in this scope
+VertiSea.ino:1021:5:  error: 'timerAnomaly' was not declared in this scope
+```
+
+The 2026-09-11 timer-anomaly guard put both next to `HEALTH_FLAG_TIMER_ANOM` and
+`loopMaxUs`, which sit around line 1330 — below `sdServiceOneSector()` at ~1020, the first
+function to use them. The Arduino preprocessor forward-declares **functions** only, never
+variables, so a definition further down the file is invisible to code above it. The
+2026-09-11 entry claimed the change was "not compiled here"; this is what that cost.
+
+Both now sit just above `#if SD_BUFFERED_WRITE` in the SD globals block — deliberately
+*outside* that guard, because `loop()`'s round-trip timer and the health record use them
+too and neither is inside it, so declaring them next to `sdServiceMaxUs` would have traded
+this error for a broken `SD_BUFFERED_WRITE 0` build.
+
+Verified by a scan of all 116 column-0 globals for any use above its definition: zero
+remaining. That scan is the check this file needed and did not have.
+
+---
+
 ## 2026-09-14 — Deployment flags move to a git-ignored `config_local.h` — `[UNCONFIRMED]`
 
 `git pull` refused to merge over `VertiSea.ino` for the second time in a week, both times

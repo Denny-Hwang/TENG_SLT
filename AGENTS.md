@@ -124,6 +124,13 @@ modified under this strategy.
   **`TELEM_ENABLE 0`**, `GPS_ENABLE 0`, `RPM_ENABLE 1`, `IMU_RAW_ONLY 1`,
   `SD_BUFFERED_WRITE 1` — i.e. an **SD-only capture build that transmits nothing**.
   Do not assume field-radio defaults, and do not assume telemetry is on.
+- **Global declaration order is load-bearing in a `.ino`.** The Arduino preprocessor
+  forward-declares *functions* only, never variables, so a `constexpr`/variable defined
+  below a function that uses it is a hard `not declared in this scope` error — and it must
+  also sit outside any `#if` narrower than its users (`TIMING_MAX_PLAUSIBLE_US` was defined
+  next to `sdServiceMaxUs` inside `#if SD_BUFFERED_WRITE` while `loop()` used it too).
+  There is no compiler in the review environment, so sweep for this before claiming a
+  firmware edit builds.
 - Debug output must use the `DBG_PRINT` / `DBG_PRINTLN` macros, never `Serial.print()`
   directly, so field builds compile it out entirely.
 - ADC is 14-bit (`analogReadResolution(14)`); `ADC_MAX = 16383`.
