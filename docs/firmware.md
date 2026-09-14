@@ -32,7 +32,10 @@ the LED heartbeat and USB serial debug output.
 
 ## Deployment Flags
 
-Edit these `#define` values near the top of `VertiSea.ino` before flashing:
+Each is an `#ifndef` default near the top of `VertiSea.ino`. Do not edit them there to
+configure a session — copy `VertiSea/config_local.h.example` to `VertiSea/config_local.h`
+(git-ignored, included first via `__has_include`) and define the ones you need. A missing
+override file gives the committed defaults below.
 
 | Flag | Values | Effect |
 |------|--------|--------|

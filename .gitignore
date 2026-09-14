@@ -7,6 +7,9 @@ __pycache__/
 # Arduino IDE
 *.bak
 
+# Per-machine deployment flags - see VertiSea/config_local.h.example
+VertiSea/config_local.h
+
 # Generated / captured data — regenerable, never committed
 SampleData/
 *.BIN

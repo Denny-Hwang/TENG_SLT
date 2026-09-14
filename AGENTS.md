@@ -113,7 +113,11 @@ modified under this strategy.
   `SPI_HALF_SPEED` internally); CS pin is 4. Do not pass `SPI_FULL_SPEED` as a second
   argument: that overload is `(clock, csPin)`, not `(csPin, speed)`.
 - **Seven** compile-time deployment flags gate major subsystems — read the "Deployment
-  Flags" section of `docs/firmware.md` before changing them: `USB_DEBUG`, `USB_TELEM`,
+  Flags" section of `docs/firmware.md` before changing them. They are `#ifndef` defaults in
+  `VertiSea.ino`, overridden per machine by the git-ignored `VertiSea/config_local.h`
+  (template: `config_local.h.example`). **Never edit the defaults in the sketch to
+  configure a session** — that is what put flag edits in the way of `git pull`.
+  The flags: `USB_DEBUG`, `USB_TELEM`,
   `TELEM_ENABLE`, `GPS_ENABLE` (**must** be `0` when no GPS is attached, or a failed I²C ACK
   hangs the bus and freezes both IMUs), `RPM_ENABLE`, `IMU_RAW_ONLY`, `SD_BUFFERED_WRITE`.
   Committed state (verified against source 2026-09-11): `USB_DEBUG 0`, `USB_TELEM 0`,

@@ -4,6 +4,27 @@ Newest first.
 
 ---
 
+## 2026-09-14 — Deployment flags move to a git-ignored `config_local.h` — `[UNCONFIRMED]`
+
+`git pull` refused to merge over `VertiSea.ino` for the second time in a week, both times
+because the operator's session flags (`TELEM_ENABLE`, `USB_TELEM`, `USB_DEBUG`) were edits
+to the committed `#define` lines. The flags describe the deployment, not the source, so they
+no longer live in the source.
+
+Every deployment flag is now an `#ifndef` default, and the sketch includes
+`VertiSea/config_local.h` first if it exists (`__has_include`, guarded for pre-GCC-5
+preprocessors; core 1.2.1 ships GCC 8). `config_local.h` is git-ignored;
+`config_local.h.example` is committed with the three standard sessions (USB GUI, USB debug
+text, field radio) ready to uncomment. The include sits above the core guard so
+`ALLOW_MBED_CORE` can be set there too. A missing override gives exactly the committed
+defaults, so nothing changes for anyone who has not created the file.
+
+Not compiled here. The one thing to watch on first build: the Arduino IDE must see
+`config_local.h` in the sketch folder — it is included by quoted name, the same mechanism
+that resolves the vendored `MadgwickAHRS.h`.
+
+---
+
 ## 2026-09-12 — An SD fault degrades instead of halting; pad numbers and raw ADC counts in the debug line — `[UNCONFIRMED]`
 
 **SD never halts setup() any more (Issue 67).** `SD.begin()` failure, filename exhaustion and

@@ -5,6 +5,15 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-14 — Session flags leave the source tree
+
+Second `git pull` conflict on `VertiSea.ino` in a week, same cause: deployment flags edited
+in place. They are now `#ifndef` defaults overridden by a git-ignored
+`VertiSea/config_local.h` (template committed). Documented in README §5, AGENTS.md and
+`docs/firmware.md`.
+
+---
+
 ## 2026-09-12 — Bench test: A14 zero is wiring, battery channel correct, SD no longer halts
 
 Bench supplies on both ADC channels (`09111727.BIN`): the battery channel read **3.28 V for

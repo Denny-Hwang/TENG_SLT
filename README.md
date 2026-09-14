@@ -214,7 +214,16 @@ Only needed for `Calibration/calibrateMag.m` (R2019b or later, no toolboxes).
 ## 5. Firmware — Flashing the Buoy
 
 1. Open `VertiSea/VertiSea.ino` in the Arduino IDE.
-2. Set the compile-time deployment flags near the top of the file. There are **seven**:
+2. Set the compile-time deployment flags **in a local override file, not in the sketch**:
+
+   ```cmd
+   copy VertiSea\config_local.h.example VertiSea\config_local.h
+   ```
+
+   then uncomment the block you need in `config_local.h`. The file is git-ignored, so
+   `git pull` never conflicts with your flags again (it did, twice, while they lived in
+   `VertiSea.ino`). Every flag in the sketch is an `#ifndef` default; a missing
+   `config_local.h` gives the committed defaults. There are **seven**:
 
    | Flag | Field (radio) | Bench GUI over USB | Bench debug text | SD-only capture |
    |------|---------------|--------------------|------------------|-----------------|

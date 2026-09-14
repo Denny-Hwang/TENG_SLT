@@ -1,0 +1,40 @@
+// VertiSea local deployment configuration - TEMPLATE.
+//
+//   copy VertiSea\config_local.h.example VertiSea\config_local.h     (Windows)
+//   cp   VertiSea/config_local.h.example VertiSea/config_local.h      (macOS / Linux)
+//
+// config_local.h is git-ignored. Set your session's flags there and `git pull` will never
+// again refuse to merge over VertiSea.ino because of them. Anything you leave commented
+// out keeps the committed default from VertiSea.ino, which is the SD-only capture build
+// that transmits nothing. Each flag is documented in full where its default is defined.
+//
+// Three ready-made sessions (uncomment ONE block, or mix as needed):
+//
+// --- Bench: live GUI over the buoy's own USB port, no radio ------------------------
+//     Confirmed on hardware 2026-09-12. All three are required together.
+// #define TELEM_ENABLE 1
+// #define USB_TELEM    1
+// #define USB_DEBUG    0
+//
+// --- Bench: human-readable debug text on USB (Serial Monitor) ----------------------
+//     Telemetry, if enabled, goes to Serial1/RFD900 - never to USB in this mode.
+// #define USB_DEBUG    1
+// #define TELEM_ENABLE 1
+//
+// --- Field: radio telemetry + SD logging ---------------------------------------------
+// #define TELEM_ENABLE 1
+// #define USB_TELEM    0
+// #define USB_DEBUG    0
+// #define GPS_ENABLE   1          // ONLY with the u-blox module physically attached
+//
+// --- Other flags (defaults shown) ----------------------------------------------------
+// #define GPS_ENABLE         0    // MUST stay 0 with no GPS on the bus (Issue 27)
+// #define RPM_ENABLE         1    // 0 compiles the Hall ISR out (Issue 65 stopgap)
+// #define IMU_RAW_ONLY       1    // 0 logs on-board attitude instead of raw counts
+// #define SD_BUFFERED_WRITE  1    // keep at 1
+// #define STAB_IMU_USES_MAG  0    // 1 enables 9-DOF fusion and the 0x07 record
+//
+// --- Escape hatch ----------------------------------------------------------------------
+// Builds on Apollo3 core 2.x are refused (Issue 59). Do not define this unless hallISR()
+// has been rewritten to avoid micros(); see the core guard in VertiSea.ino.
+// #define ALLOW_MBED_CORE

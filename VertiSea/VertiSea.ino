@@ -170,6 +170,29 @@
 #include "MadgwickAHRS.h"
 
 // =============================================================================
+//  LOCAL CONFIGURATION OVERRIDE
+// =============================================================================
+// Deployment flags are set for a specific bench or field session, and they used to be
+// set by editing the #defines below. That put every local flag change into the working
+// tree, and `git pull` then refused to merge over it - twice in one week, on the same
+// file, at the moment a fix was needed. The flags are a property of the deployment, not
+// of the source, so they now live in a file git does not track:
+//
+//     VertiSea/config_local.h        (git-ignored; copy config_local.h.example to start)
+//
+// Every flag below is an #ifndef default. Anything defined in config_local.h wins, and a
+// missing config_local.h simply means the committed defaults - the SD-only capture build.
+// Includes must come before the core guard so ALLOW_MBED_CORE can be set there too.
+//
+// __has_include is GCC >= 5 (core 1.2.1 ships GCC 8), guarded so an older preprocessor
+// degrades to "no override" rather than a syntax error.
+#if defined(__has_include)
+#  if __has_include("config_local.h")
+#    include "config_local.h"
+#  endif
+#endif
+
+// =============================================================================
 //  BOARD-SUPPORT CORE GUARD
 // =============================================================================
 // This firmware targets SparkFun Apollo3 core 1.2.1 — the bare Arduino core. Core 2.x is
@@ -200,7 +223,7 @@
 #endif
 
 // =============================================================================
-//  DEPLOYMENT FLAGS — edit these before flashing
+//  DEPLOYMENT FLAGS — committed DEFAULTS. Override in config_local.h, not here.
 // =============================================================================
 
 // USB_DEBUG: set to 1 for bench/USB debugging, 0 for field deployment.
@@ -212,7 +235,9 @@
 //       compiled out entirely (zero code size, zero clock cycles).
 //       Binary telemetry packets are sent normally (Serial1/RFD900 or USB
 //       if USB_TELEM=1).
+#ifndef USB_DEBUG
 #define USB_DEBUG 0
+#endif
 
 // USB_TELEM: set to 1 to mirror all telemetry packets to the USB Serial port
 // (Serial) instead of Serial1/RFD900. Useful for real-time GUI monitoring over
@@ -220,7 +245,9 @@
 // text-only and telemetry stays on Serial1 regardless of this flag.
 //   1 → All TELEM_WRITE() telemetry goes to Serial (USB) when USB_DEBUG=0.
 //   0 → All telemetry goes to Serial1 (RFD900 radio modem) — normal field use.
+#ifndef USB_TELEM
 #define USB_TELEM 0
+#endif
 
 // TELEM_ENABLE: master on/off switch for telemetry TRANSMISSION.
 //   1 → Telemetry packets are sent (to Serial or Serial1 per the flags above).
@@ -240,7 +267,9 @@
 //
 // Set to 0 for SD-only high-rate current capture; 1 whenever live monitoring is
 // wanted. Note USB_TELEM only *routes* telemetry and cannot switch it off.
+#ifndef TELEM_ENABLE
 #define TELEM_ENABLE 0
+#endif
 
 // GPS_ENABLE: set to 1 when the u-blox GNSS module is physically connected to
 // the I²C bus, 0 when it is absent (e.g. power-saving bench tests).
@@ -249,14 +278,18 @@
 //       the GPS module is not connected: myGNSS.begin() leaves SDA low on a
 //       failed ACK, hanging the shared I²C bus and freezing both IMUs.
 //       See IDENTIFIED_ISSUES.md #27 for the full failure analysis.
+#ifndef GPS_ENABLE
 #define GPS_ENABLE 0
+#endif
 
 // RPM_ENABLE: set to 1 when the Melexis US1881 Hall-effect sensor is physically
 // connected to HALL_PIN. Set to 0 when the sensor is absent.
 //   1 → Interrupt-driven pulse timing; rotor RPM logged to SD and transmitted
 //       over radio at TELEMETRY_RATE_HZ. Zero RPM reported after 12 s silence.
 //   0 → All Hall/RPM code compiled out entirely (zero code size, zero overhead).
+#ifndef RPM_ENABLE
 #define RPM_ENABLE 1
+#endif
 
 // IMU_RAW_ONLY: choose what the IMU logs to SD each tick.
 //   0 - Default. Log the processed 43 B TYPE_FIXED_IMU / TYPE_STAB_IMU records
@@ -285,7 +318,9 @@
 // sfe_ism_data_t held raw LSB counts. It does not — the SparkFun library scales it, and
 // gyro is in mdps, so int16 saturated at 32.767 dps while the buoy reached +/-243 dps
 // and all three axes wrapped sign (Issue 35, fixed 2026-09-03 by widening to int32).
+#ifndef IMU_RAW_ONLY
 #define IMU_RAW_ONLY 1
+#endif
 
 // SD_BUFFERED_WRITE: queue complete binary records in RAM and service the
 // existing Arduino SD 1.3.0 backend in 512-byte sectors. This independently
@@ -293,7 +328,9 @@
 // backpressure visible. The backend is still synchronous: File.write() can
 // block loop() on SPI/card latency. Direct IOM DMA was investigated separately
 // and rejected for Apollo3 core 1.2.1 after no prototype passed byte verification.
+#ifndef SD_BUFFERED_WRITE
 #define SD_BUFFERED_WRITE 1
+#endif
 
 // STAB_IMU_USES_MAG: run the stabilized IMU's Madgwick filter in 9-DOF (accel + gyro +
 // magnetometer) instead of 6-DOF. Currently 0 — heading is reported as the 999.9 sentinel
@@ -306,7 +343,9 @@
 //
 // Setting this to 1 enables magnetometer reading, calibration, the LPF, and the 9-DOF
 // Madgwick update()... but note that a log only contains 0x07 when IMU_RAW_ONLY is also 0.
+#ifndef STAB_IMU_USES_MAG
 #define STAB_IMU_USES_MAG 0
+#endif
 
 // HALL_PIN: digital GPIO connected to the US1881 output (open-collector, active-LOW).
 // The pin must support attachInterrupt() on the Artemis Nano (any free digital GPIO).
