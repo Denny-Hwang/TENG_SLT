@@ -5,6 +5,27 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 — 2.2 µF fitted: 16.9 % → 2.4 %, and the meter was measuring itself
+
+Source 3.290 V, meter on the pad 1.636 V. **The meter was reading its own loading**: 10 MΩ in
+parallel with the 98.8 kΩ bottom leg drops the pad from 1.6442 V to 1.6361 V, which is the
+1.636 V seen. On a 49.4 kΩ node, whatever you attach to look at it joins the circuit — the same
+lesson as the capacitor. The honest reference is source ÷ ratio, and `docs/adc_calibration.md`
+now says so.
+
+Against 13 624 counts (3.290 V ÷ 2.001): no capacitor **−16.9 %**, with 2.2 µF **−2.40 %**.
+
+The ~0.8 % scatter turns out not to be the battery path at all. A14 — a bench supply straight
+onto the pin, no divider, no capacitor — shows **0.79 %** against A15's 0.82 %, and the two are
+uncorrelated (r = +0.21), so it is not the shared reference either. That is this ADC's
+repeatability on this board. A14 itself reads +0.40 % against 1.100 V applied.
+
+Stopping here: −2.4 % with 0.8 % scatter is adequate for state of charge on a 3.2–3.4 V
+LiFePO4 plateau, and the rest is bench metrology that does not block the harvested-current work
+this project is for. Issue 75.
+
+---
+
 ## 2026-09-15 (confirmed) — The capacitor fixes it; SD recovery ran for real
 
 **Issue 72 closed by A/B in a single session, seconds apart, same wiring:**

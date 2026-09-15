@@ -76,6 +76,27 @@ Ceramic DC-bias derating is not a concern: even a small-package 2.2 µF X5R losi
 value at 1.65 V bias still leaves 0.44 µF, four times the part that already recovered 89 % of
 the deficit.
 
+#### Metering the pad perturbs it — use the source instead
+
+A 10 MΩ DMM across a 98.8 kΩ bottom leg is not a passive observer. It sits in parallel with
+R_bottom and lowers the ratio:
+
+| | R_bottom seen | pad for a 3.290 V source |
+|---|---|---|
+| divider alone | 98.800 kΩ | **1.6442 V** |
+| with a 10 MΩ DMM on the pad | 97.833 kΩ | **1.6361 V** |
+
+Measured 2026-09-15: source 3.290 V, meter on the pad 1.636 V. **That is the loaded figure to
+within a millivolt** — the meter was reading its own loading, not a fault. The true pad sits
+0.49 % higher than the meter says.
+
+So on this divider, "meter the pad" is a qualitative check (is it ~1.6 V or ~3.3 V?) and not a
+reference. For a number, use **source voltage ÷ divider ratio** — the source is low-impedance,
+so metering *it* costs nothing. A ≥100 MΩ (electrometer-input) meter would also do.
+
+This is the same class of error as the one the capacitor fixes: on a 49.4 kΩ node, whatever you
+attach to look at it becomes part of the circuit.
+
 #### Why not an aluminium electrolytic
 
 A cylindrical aluminium 2.2 µF will *work* on the bench and is the wrong part to leave fitted.

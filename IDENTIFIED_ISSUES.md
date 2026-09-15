@@ -3086,3 +3086,54 @@ voltage and the ADC misreading it, so a meter on the pad disagrees with the log 
 this was found. Leakage genuinely pulls the pad down, so meter and log **agree**, both low.
 Only source voltage × divider ratio against the log catches it. See the tables in
 `docs/adc_calibration.md`.
+
+
+---
+
+### Issue 75 — 🟡 Medium: 2.2 µF fitted — deficit 16.9 % → 2.4 %, and the meter was reading its own loading
+
+**Measured 2026-09-15, 11:43 capture**, 2.2 µF at the pad, source 3.290 V, meter on the pad
+1.636 V.
+
+**First: the meter reading was not the pad's true voltage.** A 10 MΩ DMM in parallel with the
+98.8 kΩ bottom leg makes it 97.833 kΩ and drops the pad from **1.6442 V to 1.6361 V** — the
+1.636 V read, to within a millivolt. The meter was measuring its own loading. On a 49.4 kΩ
+node, anything attached to look at it becomes part of the circuit, which is the same lesson as
+the capacitor itself.
+
+**The honest reference is source ÷ ratio:** 3.290 / 2.00101 = **1.6442 V = 13 624 counts**.
+
+| | counts | pad | vs 13 624 |
+|---|---|---|---|
+| no capacitor | 11 313 | 1.3653 V | **−16.9 %** |
+| 2.2 µF | **13 298** | 1.6048 V | **−2.40 %** |
+
+**Second: the ~0.8 % scatter is not the battery path.** Over 25 paired samples:
+
+| channel | mean | sd | source |
+|---|---|---|---|
+| A14 | 9 174 | 72 (**0.79 %**) | bench supply straight onto the pin — no divider, no capacitor |
+| A15 | 13 301 | 109 (**0.82 %**) | through the divider + 2.2 µF |
+
+Pearson r between them is **+0.21** — near zero, so it is not the shared 2.0 V reference
+drifting, which would move both together. A14 has nothing in front of it and shows the same
+0.79 %, so **0.8 % is this ADC's own repeatability on this board**, not something the battery
+divider is doing. The earlier reading of the A15 wander as "the capacitor's path is
+intermittent" does not survive that comparison.
+
+**A14 is in spec:** 9 174 counts = 1.1044 V against 1.100 V applied, **+0.40 %**.
+
+**What is left** is a −2.4 % offset on A15 that 2.2 µF does not remove, against 0.00045 % droop
+and a 109 ms time constant — so it is not charge starvation any more. Candidates, untested:
+
+1. The capacitor is not electrically *at* the pin (series resistance in a temporary lead
+   defeats it for the fast sample transient while still holding DC).
+2. A residual sample-time limit that only a lower source impedance fixes — i.e. re-scale the
+   divider rather than compensate it.
+3. The 2.001:1 ratio itself: the resistors were measured in circuit, and 2.4 % is within reach
+   of an in-circuit reading on a 98.8 kΩ part.
+
+**Worth stopping here for now.** −2.4 % with 0.8 % scatter is adequate for state-of-charge on a
+LiFePO4 plateau that spans 3.2–3.4 V, and the remaining work is bench metrology that does not
+block the harvested-current measurements this project is actually for. Revisit if the battery
+number is ever needed to better than a few percent.
