@@ -5,6 +5,22 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (diagnosed) — The ADC cannot charge through the battery divider
+
+Meter on the ADC pad: **1.65 V**. Log: **1.36 V**. The divider is correct; the ADC is not
+converting the voltage that is present. A 49.4 kΩ Thevenin source cannot charge the Apollo3
+SAR's sample capacitor inside one sample window, so every conversion lands 17.6 % short.
+
+Fix is **0.1 µF from the ADC pad to GND** — 0.01 % droop per conversion, 4.94 ms recovery
+against a 1 s interval. Not a firmware scale factor: the deficit moves with impedance,
+timing and temperature. Logs already captured can be scaled by 1.2131 and labelled.
+
+`docs/adc_calibration.md` now carries a scope limit: it drove both pins from low-impedance
+supplies, so it calibrated ADC **gain** and never tested whether a source can feed the ADC.
+That gap is why this took a week to find. Issue 72.
+
+---
+
 ## 2026-09-15 (final bench run) — Both channels independent; battery reads 17.6 % low
 
 The 18:18 capture is the first with **both channels live and steady at once**, and neither

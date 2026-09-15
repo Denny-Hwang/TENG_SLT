@@ -22,6 +22,18 @@ non-linearity was detected at the 3-point level.
 | **A14** (current)  | **1.014071** | **1.97225 V** | 2.000 V | −1.39 % |
 | **A15** (battery)  | **1.011584** | **1.97710 V** | 2.000 V | −1.15 % |
 
+> ### ⚠ Scope limit — this calibration does not cover the battery divider
+>
+> Both channels were driven **directly from low-impedance bench supplies**, with the DMM on
+> the pin (§2). So these numbers calibrate the **ADC's gain** and say nothing about whether a
+> given source can *feed* the ADC. The battery channel in service sits behind a 98.9 k/98.8 k
+> divider whose Thevenin impedance is **49.4 kΩ**, and on 2026-09-15 that path measured
+> **17.6 % low** — pad metered at 1.65 V, ADC reporting 1.36 V — because the Apollo3 SAR
+> cannot charge its sample capacitor through that impedance in one sample window. The gain
+> figures below remain correct; they are simply not the whole conversion chain. See
+> IDENTIFIED_ISSUES.md Issue 72. Fit 0.1 µF from the ADC pad to GND before trusting a
+> divider-fed channel.
+
 *Effective reference* = 2.000 V / gain. Substituting it for the nominal 2.0 V in
 `counts × VREF / 16383` corrects the channel with **no other change** to the conversion chain,
 which is how `VertiSea.ino` applies it (Section 5).

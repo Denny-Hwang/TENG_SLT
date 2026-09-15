@@ -2936,7 +2936,7 @@ the room; guessing which it was would have been worth nothing either way.
 
 ---
 
-### Issue 72 — 🟠 High: the battery channel reads 17.6 % low through the rebuilt divider
+### Issue 72 — ✅ DIAGNOSED: the ADC cannot charge through a 49.4 kΩ divider (fix: 0.1 µF at the pad)
 
 **Found:** 2026-09-15, the 18:18 capture — the first run in which **both channels read sane
 values at the same time**, which is itself the final confirmation that Issue 69 is closed:
@@ -2963,15 +2963,31 @@ If the source is still 3.300 V, the *effective* divider ratio is **2.427:1** aga
 **≈232 kΩ** — either a real parallel path, or the ADC itself failing to charge through the
 divider.
 
-**Two families, one cheap test.** With everything connected and the supply on, put a meter
-directly on the ADC pad (A15, Apollo3 pad 32) against board GND:
+**Meter on the pad: 1.65 V.** The log says 1.36 V. **The divider is correct and the ADC is
+the thing that is wrong** — it is not converting the voltage that is actually present.
 
-| meter reads | meaning | fix |
-|---|---|---|
-| **≈1.65 V** while the log says 1.36 V | the ADC is loading the divider | 0.1 µF from pad to GND, and/or lower the divider resistances |
-| **≈1.36 V** | the divider really is 2.43:1 | measure both resistors **out of circuit** — an in-circuit reading is a parallel combination, not the part |
+That settles it: the Apollo3 SAR cannot charge its sample capacitor through a 49.4 kΩ source
+inside one sample window, so every conversion lands short by the same fraction.
 
-**Why the ADC-loading branch is credible.** The divider's Thevenin impedance is **49.4 kΩ**.
+**Fix: 0.1 µF from the ADC pad to board GND.**
+
+| | |
+|---|---|
+| droop per conversion | ~10 pF sample cap against 100 nF ≈ **0.01 %** |
+| recovery | 49.4 kΩ × 0.1 µF = **4.94 ms**, against a **1 s** sampling interval — 200 τ |
+
+It costs nothing at 1 Hz and removes the failure mode outright. Lowering the divider
+resistances also works but trades quiescent draw: 98.9 k/98.8 k pulls 16.7 µA from the cell,
+10 k/10 k would pull 165 µA — about 8 mAh over a two-day deployment, for no benefit the
+capacitor does not already give.
+
+**Do not "fix" this in firmware with a scale factor.** The deficit depends on source
+impedance, sample timing and temperature; calibrating it out would bake a moving number into
+the log format. The one legitimate use of the measured ratio is **correcting data already
+captured**: multiply `voltage_V` by **13 666 / 11 265 = 1.2131** for logs taken before the
+capacitor is fitted, and label them as corrected.
+
+**Why this is the ADC and not the divider.** The divider's Thevenin impedance is **49.4 kΩ**.
 The Apollo3 SAR samples onto a switched capacitor that, at roughly 1.2 MHz and ~10 pF, looks
 like **~83 kΩ** during the sample window. A 49 kΩ source cannot deliver the charge in time,
 so the conversion lands **short** — always low, never high, and by a fixed fraction. That is
@@ -2984,6 +3000,13 @@ the divider's ability to feed it.
 used the pre-rebuild divider, the loss is new and belongs to the rebuild. That run's wiring is
 not documented well enough to lean on, so it is recorded as a lead, not a conclusion.
 
-**Regardless of which branch wins, 49.4 kΩ is out of spec for this ADC** and a 0.1 µF at the
-pad is worth fitting: it costs nothing on a 1 Hz measurement and removes the whole failure
-mode. The parser now says so on any log whose divider Thevenin exceeds 10 kΩ.
+**Is the existing double-read enough?** No — the firmware already discards one A15
+conversion after the channel switch and keeps the second, and the deficit survives that. But
+"two reads are not enough" and "more reads would never help" are different claims, and the log
+could not separate them. The firmware now prints the **discarded first conversion** beside the
+kept one as `A15=<second>/<first>`: if the second sits above the first, consecutive
+conversions are topping up the sample cap and more reads would converge; if they are equal,
+every conversion carries the same deficit and only hardware fixes it. One line of debug output
+settles a question that theory about switched-capacitor front ends cannot.
+
+The parser flags any divider whose Thevenin exceeds 10 kΩ and now cites this measurement.

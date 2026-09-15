@@ -4,6 +4,24 @@ Newest first.
 
 ---
 
+## 2026-09-15 — Show the discarded first battery conversion — `[UNCONFIRMED]`
+
+The battery channel reads 17.6 % low through its 49.4 kΩ divider (Issue 72): the pad meters
+1.65 V while the ADC reports 1.36 V, so the Apollo3 SAR is not charging its sample capacitor
+in one sample window. The firmware already discards one conversion after the channel switch
+and keeps the second, and the deficit survives that.
+
+"Two reads are not enough" and "more reads would never help" are different claims, and the
+log could not separate them. The discarded first conversion is now kept in
+`lastBatteryFirstCounts` and printed beside the kept one as `A15=<second>/<first>`. Equal
+values mean every conversion carries the same deficit and only hardware fixes it; a second
+above the first means consecutive reads top up the cap and more would converge. One debug
+field settles what theory about switched-capacitor front ends cannot.
+
+No behaviour change — the extra read was already happening and being thrown away.
+
+---
+
 ## 2026-09-14 (fix) — `TIMING_MAX_PLAUSIBLE_US` / `timerAnomaly` were declared below their first user — `[CONFIRMED broken]`
 
 Build error from hardware:

@@ -1421,6 +1421,14 @@ uint32_t loopMaxUs      = 0;
 // touching the probe to the pad.
 uint16_t lastCurrentCounts = 0;
 uint16_t lastBatteryCounts = 0;
+// The FIRST battery conversion - the one normally thrown away after the channel switch.
+// Kept only so the debug line can show it beside the second, which answers a question
+// theory cannot: with a high-impedance source the ADC reads low because its sample
+// capacitor cannot charge in time, and if consecutive conversions were topping that cap
+// up then read #2 would sit above read #1. Equal readings mean every conversion carries
+// the same deficit, so adding more reads is wasted and only hardware fixes it
+// (IDENTIFIED_ISSUES.md Issue 72).
+uint16_t lastBatteryFirstCounts = 0;
 uint32_t lastLoopEntryUs = 0;
 unsigned long lastHealthMs = 0;
 
@@ -2470,7 +2478,7 @@ void loop() {
   // a channel change.
   if (nowMs - lastBatteryTime >= BATTERY_INTERVAL_MS) {
     lastBatteryTime = nowMs;
-    (void)analogRead(BATTERY_PIN);
+    lastBatteryFirstCounts = analogRead(BATTERY_PIN);   // discarded for data; kept for diagnosis
     uint16_t batteryCounts = analogRead(BATTERY_PIN);
     (void)analogRead(A_PIN);
     lastBatteryCounts = batteryCounts;
@@ -3013,7 +3021,10 @@ void loop() {
     // A14 is ~9 970 and 3.30 V through the A15 divider is ~13 690. A steady 0 with a
     // supply attached means the pad is not at that voltage — probe it.
     DBG_PRINT(" A14="); DBG_PRINT(lastCurrentCounts);
-    DBG_PRINT(" A15="); DBG_PRINTLN(lastBatteryCounts);
+    DBG_PRINT(" A15="); DBG_PRINT(lastBatteryCounts);
+    // A15a is the discarded first conversion after the channel switch. A15a == A15 means
+    // consecutive reads do not top up the sample cap, so the deficit is per-conversion.
+    DBG_PRINT("/"); DBG_PRINTLN(lastBatteryFirstCounts);
   }
 
   // ---- 1 Hz system status telemetry (radio) --------------------------------

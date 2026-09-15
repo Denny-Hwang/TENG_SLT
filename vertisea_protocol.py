@@ -642,12 +642,15 @@ def parse_binary_file(bin_path: str) -> dict:
                     f"(Thevenin of {cal['r_top_ohm'] / 1000.0:.1f} k / "
                     f"{cal['r_bottom_ohm'] / 1000.0:.1f} k), well above the <10 kohm the "
                     "Apollo3 SAR wants. Its switched-cap input looks like ~83 kohm during "
-                    "the sample window, so a source this stiff may not settle and the "
-                    "channel then reads LOW by a fixed fraction - which looks exactly "
-                    "like a wrong divider ratio. A 0.1 uF from the ADC pad to GND gives "
-                    "the sample cap a local charge reservoir and costs nothing on a "
-                    "1 Hz measurement. To tell the two apart, meter the pad directly: if "
-                    "the meter and this log disagree, it is the ADC loading the divider.")
+                    "the sample window, so a source this stiff does not settle and the "
+                    "channel reads LOW by a fixed fraction - which looks exactly like a "
+                    "wrong divider ratio until you meter the pad. CONFIRMED on this "
+                    "board 2026-09-15: pad metered at 1.65 V while the ADC reported "
+                    "1.36 V, a 17.6 % deficit (Issue 72). Fit 0.1 uF from the ADC pad to "
+                    "GND - it gives the sample cap a local charge reservoir, droops "
+                    "~0.01 % per conversion and recovers in ~5 ms against a 1 s sampling "
+                    "interval, so it costs nothing here. Logs taken before that cap is "
+                    "fitted read low by this fraction and should be scaled, not trusted.")
 
             n_pinned = sum(1 for r in data['battery_voltage']
                            if r['counts'] >= adc_max)
