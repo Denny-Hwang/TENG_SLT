@@ -635,9 +635,16 @@ def parse_binary_file(bin_path: str) -> dict:
                     "reading - the true voltage is anything at or above it. The pad is "
                     f"above the {cal['vref']:.2f} V ADC reference. With the "
                     f"{cal['div_ratio']:.3f}:1 divider the pad must stay under "
-                    f"{cal['vref']:.2f} V, i.e. the battery node under {fs_v:.2f} V, so "
-                    "check that the supply feeds the DIVIDER INPUT and not the ADC pad "
-                    "directly, and that neither resistor is open.")
+                    f"{cal['vref']:.2f} V, i.e. the battery node under {fs_v:.2f} V. "
+                    "A pinned reading that appears the moment the source is connected "
+                    "means the divider is not dividing - the pad is seeing very nearly "
+                    "the whole source. Measure resistance with the supply OFF: "
+                    f"pad to board GND should read ~{cal['r_bottom_ohm'] / 1000.0:.1f} k, "
+                    f"pad to the divider input ~{cal['r_top_ohm'] / 1000.0:.1f} k, and "
+                    f"input to GND ~{(cal['r_top_ohm'] + cal['r_bottom_ohm']) / 1000.0:.1f} k. "
+                    "An open bottom leg - or its ground return - reads infinite pad-to-GND "
+                    "and lets the pad float up to the source, which is the most common "
+                    "cause after any rework of the grounding.")
 
             # A 1S LiFePO4 cell lives between ~2.5 V (empty) and 3.65 V (charge
             # termination). A steady reading outside that says the divider ratio in the

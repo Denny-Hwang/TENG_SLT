@@ -5,6 +5,31 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (resolved) — Grounding fixed the channel interaction; the divider is open
+
+Correcting the grounding resolved Issue 69, and the proof is clean: the battery channel sat
+pinned at 16 383 for five seconds **before** the current channel was energised, and when the
+current channel came up it read 9 130 counts = 1.099 V = **109.9 mA against 1.100 V applied**,
+then stayed correct while the battery channel stayed pinned. Two faults that no longer move
+together are two independent channels.
+
+My SERIES/TRACKING-supply hypothesis was wrong, for the same reason the withdrawn Issue 68
+was: I kept looking for an explanation that made both channels one system, when the evidence
+only ever showed a shared return.
+
+What remains is simpler and separate. The battery pad sits at very nearly the full source
+voltage — pinned from the instant the source is connected — so the bottom leg of the divider
+is doing nothing: an open R_bottom or an open ground return on it, which is the usual outcome
+of reworking grounding. The resistors themselves measure fine. Issue 70, with the
+resistance checks now printed in the parser's saturation warning from the values the log
+already carries.
+
+Also logged: the current channel drifts +23.9 % on a supposedly fixed 1.100 V input over
+eight seconds, probably a hand on the supply knob, but worth one untouched 60 s run to rule
+out. Issue 71.
+
+---
+
 ## 2026-09-15 (correction) — The divider is fine; the supply is stacking
 
 The resistors were measured: **98.9 kΩ / 98.8 kΩ**, a ratio of 2.001 against the firmware's
