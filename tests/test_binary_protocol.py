@@ -474,6 +474,44 @@ class TestDerivedConversions(unittest.TestCase):
         self.assertIn("BATTERY VOLTAGE IMPLAUSIBLE", joined)
         self.assertIn("BATTERY_R_TOP_OHM", joined)
 
+    def test_channel_interaction_is_measured_from_an_ordinary_log(self):
+        """Battery-vs-current interaction is computable from any log that has both.
+
+        The battery node is held at a fixed 13686 counts while the current channel is
+        idle, and shifts to 13000 while it is driven - the shape of a bench test where
+        the two inputs are interacting through the wiring.
+        """
+        r_top, r_bottom = 98700.0, 98900.0
+        blob = battery_cal(0, 1.97710, 16383.0, r_top, r_bottom,
+                           (r_top + r_bottom) / r_bottom)
+        blob += current_cal(0, vref=1.97225, adc_max=16383.0, div_ratio=1.0, sens=100.0)
+        for s in range(10):
+            driven = s >= 5
+            blob += current_block(1000 * s, 999,
+                                  tuple([9137 if driven else 5] * 10))
+            blob += record(vs.TYPE_BATTERY_VOLTAGE, 1000 * s + 500,
+                           struct.pack('<H', 13000 if driven else 13686))
+        data = parse_bytes(blob)
+        self.assertEqual(structural_errors(data), [])
+        note = next((n for n in data['notes'] if 'ADC channel interaction' in n), None)
+        self.assertIsNotNone(note, "the interaction measurement did not run")
+        self.assertIn("13686 counts while the current channel is idle", note)
+        self.assertIn("13000 while it is driven", note)
+        self.assertIn("-686 counts", note)
+
+    def test_no_interaction_note_when_the_current_channel_never_moves(self):
+        """With nothing to compare, the measurement must stay silent rather than guess."""
+        r_top, r_bottom = 98700.0, 98900.0
+        blob = battery_cal(0, 1.97710, 16383.0, r_top, r_bottom,
+                           (r_top + r_bottom) / r_bottom)
+        blob += current_cal(0, vref=1.97225, adc_max=16383.0, div_ratio=1.0, sens=100.0)
+        for s in range(10):
+            blob += current_block(1000 * s, 999, tuple([5] * 10))
+            blob += record(vs.TYPE_BATTERY_VOLTAGE, 1000 * s + 500,
+                           struct.pack('<H', 13686))
+        data = parse_bytes(blob)
+        self.assertFalse([n for n in data['notes'] if 'ADC channel interaction' in n])
+
     def test_zero_adc_max_is_reported_not_crashed(self):
         blob = (current_block(0, 9, tuple([1] * 10))
                 + current_cal(1, vref=2.0, adc_max=0.0, div_ratio=1.0, sens=100.0))

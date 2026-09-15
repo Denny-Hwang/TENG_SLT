@@ -5,6 +5,28 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (later) — The two ADC channels do not interfere in the MCU; measure the interaction instead
+
+Bench report: each supply alone reads correctly, both together and neither does — concluded
+as "the MCU cannot measure voltage and current at the same time". This project's own
+`docs/adc_calibration.md` disproves that directly: three 120 s runs with both channels driven
+simultaneously from separate supplies at different voltages, 60 000 samples each, every
+channel tracking its own DMM value to within 1.4 %. The Apollo3 ADC is one SAR behind a mux —
+time-multiplexed, not restricted. Issue 69.
+
+Decoding the log shows no steady-state row with both channels energised, only single
+transition seconds, so it does not yet demonstrate the fault. `vertisea_protocol.py` now
+measures the thing directly from any log that has both channels, and deliberately reports
+rather than diagnoses: a battery sagging under harvested current is real on a deployment log
+and impossible on a bench capture with a supply holding the node.
+
+Separately, the battery divider was rebuilt without updating the firmware: 3.30 V reads
+≈14 900 counts where 13 686 is expected, an implied 1.835:1 against the compiled 1.998:1, so
+every battery voltage is +8.9 %. Inside the plausibility band, so no existing check catches
+it. Issue 68.
+
+---
+
 ## 2026-09-15 — Bench calibration reads: absolute mode, and battery range checks
 
 A rebuilt divider and a fresh bench test (3.3 V battery side, 1.1 V current side, both

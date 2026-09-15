@@ -2791,3 +2791,84 @@ operator's notes from an older build still read correctly.
 `TELEM_ENABLE 1`, live telemetry on the buoy's own USB port populated every field — the N/A
 seen earlier was `USB_DEBUG 1` routing packets to `Serial1`. The card-less path is the
 remaining `[UNCONFIRMED]` piece: it needs one boot with the slot empty and the 4 Hz LED.
+
+
+---
+
+### Issue 68 — 🟡 Medium: the battery divider was rebuilt without updating the firmware constants
+
+**Found:** 2026-09-15, bench session, from the `USB_DEBUG` line.
+
+With a 3.30 V source on the battery input, `A15` reads a steady **≈14 900 counts**. Expected
+is **13 686**.
+
+| | counts | pad volts | reported |
+|---|---|---|---|
+| expected (3.30 V through a 1.998:1 divider) | 13 686 | 1.6517 V | 3.300 V |
+| **observed** | **≈14 900** | **1.7995 V** | **3.595 V** |
+
+The pad is at 1.7995 V, so for a 3.30 V source the divider actually fitted is
+**3.30 / 1.7995 = 1.835:1**, not the 1.998:1 the firmware carries. The reading is
+**+8.9 %** and it is a clean scale error, not noise — the counts are rock steady across
+twenty-plus seconds.
+
+`BATTERY_DIV_RATIO` is computed from `BATTERY_R_TOP_OHM` / `BATTERY_R_BOTTOM_OHM` at compile
+time and written into `TYPE_BATTERY_CAL`, so the parser faithfully reproduces the firmware's
+wrong ratio. Nothing else catches it: the ADC is in range, the counts are plausible, and
+3.59 V is a believable number for a 1S cell. This is the exact failure mode the
+2026-09-15 `BATTERY VOLTAGE IMPLAUSIBLE` check was added for — and it does **not** fire here,
+because 3.59 V falls inside the 2.0–3.8 V plausibility band. A scale error that lands inside
+the plausible range is only catchable against a known input.
+
+**Fix:** measure the two resistors actually fitted, put them in `BATTERY_R_TOP_OHM` /
+`BATTERY_R_BOTTOM_OHM`, reflash. Or derive the ratio from the bench reading itself:
+`ratio = V_source / (counts × VREF_A15 / 16383)`. Logs written before the reflash are
+correctable after the fact — multiply `voltage_V` by `ratio_true / ratio_logged`, since the
+log carries the ratio it used.
+
+---
+
+### Issue 69 — 🟠 High: "the MCU cannot measure voltage and current at once" — it can; the interaction is in the wiring
+
+**Reported:** 2026-09-15 — each supply alone reads correctly, both together and neither does.
+
+**The MCU claim is disproved by this project's own data.** `docs/adc_calibration.md` §3.1–3.2
+records three 120 s captures with **both channels driven simultaneously from separate bench
+supplies at different voltages**, 60 000 samples per channel per run:
+
+| Run | A14 DMM | A14 measured | A15 DMM | A15 measured |
+|---|---|---|---|---|
+| 1 | 93 mV | 92.84 mV | 1719 mV | 1738.39 mV |
+| 2 | 1028 mV | 1042.05 mV | 1447 mV | 1463.69 mV |
+| 3 | 1864 mV | 1890.53 mV | 1217 mV | 1231.92 mV |
+
+Every channel tracked **its own** source to within 1.4 % with the other channel energised at
+a different voltage. The Apollo3 ADC is one SAR behind a mux: it converts one channel at a
+time and `analogRead()` reconfigures the slot per call, which is time-multiplexing, not a
+restriction. So the channels interacting is a property of the wiring in front of them, not
+of the MCU.
+
+**What the 2026-09-15 log actually shows.** Decoded, every row has at most **one** channel
+energised — `A14=0, A15≈14 900` or `A14≈9 050, A15≈0` — apart from single transition seconds
+(`A14=5371 A15=3643`) caught mid-switch. **There is no steady-state row with both channels
+driven**, so this log does not yet demonstrate the fault; it demonstrates the toggling. It
+does contain six consecutive seconds of `A15=16383` (pinned above the reference) which is
+worth explaining on its own.
+
+**Leading hypothesis: a shared return.** Two bench supplies whose negatives meet the board at
+different points, or sense nodes tied together on the harvester board, put a common-mode
+offset on both inputs when both are live — which pushes one input up (the `A15=16383` phase)
+and the other below ground (`A14=0`). That matches "each alone is fine, both together is not"
+exactly, and no ADC behaviour does.
+
+**Measurement added rather than argument.** Both channels are already in every log — battery
+at 1 Hz (0x14), current at ~800 Hz (0x0E) — so `vertisea_protocol.py` now groups battery
+samples by the current level in force at the same instant and reports the shift. On a
+deployment log a battery that sags under harvested current is **real** (cell internal
+resistance, which this system exists to measure); on a bench capture with a supply holding
+the node fixed, the same number can only be the inputs interacting. The log cannot tell those
+apart, so the note prints the measurement and names both readings.
+
+**Decisive test:** both supplies on, **untouched for 60 s**, `USB_DEBUG 1`. Both channels
+steady and correct at once → wiring was marginal, not a design fault. One collapses → tie
+both supply returns to a single board GND point and repeat.

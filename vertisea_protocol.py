@@ -22,6 +22,7 @@ Can also be run directly to convert logs without opening the GUI:
     python3 vertisea_protocol.py LOG00001.BIN [more.BIN ...]
 """
 
+import bisect
 import csv
 import os
 import struct
@@ -643,6 +644,53 @@ def parse_binary_file(bin_path: str) -> dict:
             data['errors'].append(
                 "No BATTERY_CAL record in log — battery voltage is reported as "
                 "raw ADC counts only, voltage_V left blank.")
+
+    # ---- Do the two ADC channels interfere? -------------------------------------
+    # Both channels are logged: battery at 1 Hz (0x14) and current at ~800 Hz (0x0E).
+    # That is enough to answer "does the battery reading depend on what the current
+    # channel is seeing" from any existing log, without a scope and without a special
+    # firmware mode - group the battery samples by the current level in force at the
+    # same instant and compare.
+    #
+    # WHY THIS IS REPORTED AND NOT DIAGNOSED: on a deployment log a battery reading that
+    # sags when harvested current is high is REAL - it is the cell's internal resistance
+    # under load, which is a thing this system exists to measure. The same number on a
+    # BENCH capture, where a supply holds the battery node at a fixed voltage, can only
+    # be the two inputs interacting through the wiring. The log cannot tell those apart,
+    # so this prints the measurement and names both readings.
+    if data['battery_voltage'] and data['current_fast'] and len(data['battery_voltage']) >= 4:
+        cur = [(r['ts_ms'], r['counts']) for r in data['current_fast']]
+        cur.sort()
+        cur_ts = [t for t, _ in cur]
+        adc_max_c = (data['current_cal'][0]['adc_max']
+                     if data['current_cal'] else 16383.0) or 16383.0
+        low, high = [], []
+        for rec in data['battery_voltage']:
+            # Current samples inside the +/-0.5 s the battery sample sits in.
+            lo_i = bisect.bisect_left(cur_ts, rec['ts_ms'] - 500.0)
+            hi_i = bisect.bisect_right(cur_ts, rec['ts_ms'] + 500.0)
+            window = [c for _, c in cur[lo_i:hi_i]]
+            if not window:
+                continue
+            level = sorted(window)[len(window) // 2] / adc_max_c
+            (high if level > 0.20 else low if level < 0.05 else []).append(rec['counts'])
+        if len(low) >= 3 and len(high) >= 3:
+            m_low = sum(low) / len(low)
+            m_high = sum(high) / len(high)
+            delta = m_high - m_low
+            pct = 100.0 * delta / m_low if m_low else 0.0
+            data['notes'].append(
+                f"ADC channel interaction: battery reads {m_low:.0f} counts while the "
+                f"current channel is idle (n={len(low)}) and {m_high:.0f} while it is "
+                f"driven (n={len(high)}) - a shift of {delta:+.0f} counts ({pct:+.1f}%). "
+                "On a deployment log that is the cell sagging under load and is real. On "
+                "a BENCH capture with a supply holding the battery node fixed it can only "
+                "be the two inputs interacting through the wiring - check that both "
+                "supply returns meet the board at ONE point and that nothing ties the two "
+                "sense nodes together. The ADC itself measures both channels "
+                "independently: docs/adc_calibration.md logged them simultaneously at "
+                "500 Hz with different voltages on each, three times, and each tracked "
+                "its own DMM value to within 1.4%.")
 
     # ---- Derive Hall edge periods and RPM ---------------------------------------
     # Done as a post-pass so it works across packet boundaries: edges are batched
