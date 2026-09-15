@@ -2932,3 +2932,58 @@ Raising it was still right. A 24 % excursion on what is described as a fixed inp
 invalidate every harvested-current number this system produces, and the log cannot tell a
 hand on a knob from a drifting channel. Closing it took one sentence from someone who was in
 the room; guessing which it was would have been worth nothing either way.
+
+
+---
+
+### Issue 72 — 🟠 High: the battery channel reads 17.6 % low through the rebuilt divider
+
+**Found:** 2026-09-15, the 18:18 capture — the first run in which **both channels read sane
+values at the same time**, which is itself the final confirmation that Issue 69 is closed:
+
+```
+A14=9078  A15=25        <- current channel up, battery source not yet connected
+A14=9060  A15=11320     <- battery source connected; BOTH live, BOTH steady
+A14=9034  A15=11265
+A14=0     A15=11262     <- current supply off, battery unaffected
+```
+
+Neither channel moves when the other is switched. They are independent.
+
+**But the battery level is wrong by a clean fixed fraction.**
+
+| | counts | pad | divider input |
+|---|---|---|---|
+| expected, 3.300 V through 2.001:1 | 13 666 | 1.6492 V | 3.300 V |
+| **observed** | **11 265** | **1.3595 V** | **2.720 V** |
+| ratio | **0.8243** | | **−17.6 %** |
+
+If the source is still 3.300 V, the *effective* divider ratio is **2.427:1** against the
+2.001:1 the log carries. That is equivalent to the pad being shunted to ground by
+**≈232 kΩ** — either a real parallel path, or the ADC itself failing to charge through the
+divider.
+
+**Two families, one cheap test.** With everything connected and the supply on, put a meter
+directly on the ADC pad (A15, Apollo3 pad 32) against board GND:
+
+| meter reads | meaning | fix |
+|---|---|---|
+| **≈1.65 V** while the log says 1.36 V | the ADC is loading the divider | 0.1 µF from pad to GND, and/or lower the divider resistances |
+| **≈1.36 V** | the divider really is 2.43:1 | measure both resistors **out of circuit** — an in-circuit reading is a parallel combination, not the part |
+
+**Why the ADC-loading branch is credible.** The divider's Thevenin impedance is **49.4 kΩ**.
+The Apollo3 SAR samples onto a switched capacitor that, at roughly 1.2 MHz and ~10 pF, looks
+like **~83 kΩ** during the sample window. A 49 kΩ source cannot deliver the charge in time,
+so the conversion lands **short** — always low, never high, and by a fixed fraction. That is
+exactly the sign and shape observed. `docs/adc_calibration.md` never covered this: it drove
+both pins from **low-impedance bench supplies directly**, so it calibrated the ADC's gain, not
+the divider's ability to feed it.
+
+**Note the 2026-09-11 counter-evidence.** The same channel then read 13 591–13 639 counts =
+**3.28–3.29 V** for a 3.3 V source, i.e. correct, apparently through a divider. If that run
+used the pre-rebuild divider, the loss is new and belongs to the rebuild. That run's wiring is
+not documented well enough to lean on, so it is recorded as a lead, not a conclusion.
+
+**Regardless of which branch wins, 49.4 kΩ is out of spec for this ADC** and a 0.1 µF at the
+pad is worth fitting: it costs nothing on a 1 Hz measurement and removes the whole failure
+mode. The parser now says so on any log whose divider Thevenin exceeds 10 kΩ.

@@ -5,6 +5,24 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (final bench run) — Both channels independent; battery reads 17.6 % low
+
+The 18:18 capture is the first with **both channels live and steady at once**, and neither
+moves when the other is switched — Issue 69 confirmed closed.
+
+The battery level is still wrong, but now by a clean fixed fraction: 11 265 counts against
+13 666 expected, **−17.6 %**, which puts the divider input at 2.720 V instead of 3.300 V.
+That is equivalent to ~232 kΩ shunting the pad. Two candidates, separated by one meter
+reading at the pad: a real parallel path, or the ADC failing to charge through a **49.4 kΩ**
+Thevenin source when the Apollo3 switched-cap input looks like ~83 kΩ during its sample
+window. The existing ADC calibration cannot rule on this — it drove both pins from
+low-impedance supplies directly, so it calibrated gain, not the divider's ability to feed it.
+
+Either way 49.4 kΩ is out of spec for this ADC, so the parser now flags any divider whose
+Thevenin exceeds 10 kΩ and recommends 0.1 µF at the pad. Issue 72.
+
+---
+
 ## 2026-09-15 (closed) — Wrong injection point, and the drift was a knob
 
 Both remaining bench issues closed by the operator.

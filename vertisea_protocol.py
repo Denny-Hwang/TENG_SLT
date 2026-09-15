@@ -624,6 +624,31 @@ def parse_binary_file(bin_path: str) -> dict:
                     "compare that last number with the supply setting; the pad saturates "
                     f"once the divider input passes {adc_max * scale:.3f} V.")
 
+            # Can the ADC actually charge its sample capacitor through this divider?
+            # The Apollo3 SAR samples onto a switched capacitor: at roughly 1.2 MHz and
+            # ~10 pF the input looks like ~83 kohm for the duration of the sample window.
+            # A source whose Thevenin impedance approaches that cannot deliver the charge
+            # in time, so the conversion lands SHORT of the true voltage - always low,
+            # never high, and by a fixed fraction, which is indistinguishable from a
+            # wrong divider ratio unless you know the source. Ambiq's guidance is to keep
+            # the source well under 10 kohm, or to put a local capacitor at the pin so the
+            # sample cap draws its charge from that instead of through the resistors.
+            r_th = (cal['r_top_ohm'] * cal['r_bottom_ohm'] /
+                    (cal['r_top_ohm'] + cal['r_bottom_ohm'])
+                    if (cal['r_top_ohm'] + cal['r_bottom_ohm']) else 0.0)
+            if r_th > 10000.0:
+                data['notes'].append(
+                    f"Battery divider source impedance is {r_th / 1000.0:.1f} kohm "
+                    f"(Thevenin of {cal['r_top_ohm'] / 1000.0:.1f} k / "
+                    f"{cal['r_bottom_ohm'] / 1000.0:.1f} k), well above the <10 kohm the "
+                    "Apollo3 SAR wants. Its switched-cap input looks like ~83 kohm during "
+                    "the sample window, so a source this stiff may not settle and the "
+                    "channel then reads LOW by a fixed fraction - which looks exactly "
+                    "like a wrong divider ratio. A 0.1 uF from the ADC pad to GND gives "
+                    "the sample cap a local charge reservoir and costs nothing on a "
+                    "1 Hz measurement. To tell the two apart, meter the pad directly: if "
+                    "the meter and this log disagree, it is the ADC loading the divider.")
+
             n_pinned = sum(1 for r in data['battery_voltage']
                            if r['counts'] >= adc_max)
             if n_pinned:
