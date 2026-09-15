@@ -424,6 +424,56 @@ class TestDerivedConversions(unittest.TestCase):
         self.assertLess(counts, adc_max, "a full cell must stay below ADC full scale")
         self.assertAlmostEqual(data['battery_voltage'][0]['voltage_V'], 3.65, places=2)
 
+    def test_bypassed_divider_pins_the_adc_and_is_reported(self):
+        """3.3 V straight onto the pad saturates: the log then shows a constant 3.95 V.
+
+        This is the bench failure a multimeter cannot see - the meter reads the source
+        correctly while the PAD is what is out of range - so the parser has to say it.
+        """
+        r_top, r_bottom = 98700.0, 98900.0
+        ratio = (r_top + r_bottom) / r_bottom
+        vref, adc_max = 1.97710, 16383.0
+        blob = battery_cal(0, vref, adc_max, r_top, r_bottom, ratio)
+        for i in range(3):
+            blob += record(vs.TYPE_BATTERY_VOLTAGE, 1000 * (i + 1),
+                           struct.pack('<H', 16383))
+        data = parse_bytes(blob)
+        self.assertEqual(structural_errors(data), [])
+        joined = " ".join(data['errors'])
+        self.assertIn("BATTERY CHANNEL SATURATED", joined)
+        self.assertIn("3 of 3 samples pinned", joined)
+        # The floor it converts to is the divider's full scale, not a real cell voltage.
+        self.assertAlmostEqual(data['battery_voltage'][0]['voltage_V'], 3.95, places=2)
+
+    def test_correctly_divided_input_raises_no_battery_warning(self):
+        """3.3 V at the divider INPUT is in range and must stay silent."""
+        r_top, r_bottom = 98700.0, 98900.0
+        ratio = (r_top + r_bottom) / r_bottom
+        vref, adc_max = 1.97710, 16383.0
+        counts = int(round(3.30 / ratio / vref * adc_max))
+        blob = (battery_cal(0, vref, adc_max, r_top, r_bottom, ratio)
+                + record(vs.TYPE_BATTERY_VOLTAGE, 1000, struct.pack('<H', counts)))
+        data = parse_bytes(blob)
+        joined = " ".join(data['errors'])
+        self.assertNotIn("BATTERY CHANNEL SATURATED", joined)
+        self.assertNotIn("BATTERY VOLTAGE IMPLAUSIBLE", joined)
+        self.assertAlmostEqual(data['battery_voltage'][0]['voltage_V'], 3.30, places=2)
+
+    def test_wrong_div_ratio_is_flagged_as_implausible(self):
+        """A rebuilt divider whose resistors are not in the firmware scales the answer.
+
+        Nothing else catches this: the counts are believable and the ADC is in range, so
+        the only signal is that the result cannot be a 1S LiFePO4 cell.
+        """
+        vref, adc_max = 1.97710, 16383.0
+        # Firmware still compiled for ~2:1 while a 5:1 divider is fitted.
+        blob = battery_cal(0, vref, adc_max, 98700.0, 98900.0, 5.0)
+        blob += record(vs.TYPE_BATTERY_VOLTAGE, 1000, struct.pack('<H', 13686))
+        data = parse_bytes(blob)
+        joined = " ".join(data['errors'])
+        self.assertIn("BATTERY VOLTAGE IMPLAUSIBLE", joined)
+        self.assertIn("BATTERY_R_TOP_OHM", joined)
+
     def test_zero_adc_max_is_reported_not_crashed(self):
         blob = (current_block(0, 9, tuple([1] * 10))
                 + current_cal(1, vref=2.0, adc_max=0.0, div_ratio=1.0, sens=100.0))

@@ -592,6 +592,11 @@ def stats(v):
     return {"n": n, "mean": m, "sd": sd, "min": s[0], "median": s[n // 2], "max": s[-1]}
 
 
+def _median(v):
+    s = sorted(v)
+    return s[len(s) // 2]
+
+
 def bin_medians(ts, v, bin_s=1.0):
     """Group into fixed time bins; return [(bin_index, values)] sorted by bin."""
     t0 = ts[0]
@@ -730,6 +735,15 @@ def _report_input(lines, path, ts, ct, cal, cal_src, k):
     nz = sum(1 for x in ct if x == 0)
     lines.append("  at/over full scale: %d   exact zeros: %d (%.2f%%)"
                  % (sum(1 for x in ct if x >= cal["adc_max"]), nz, 100.0 * nz / n))
+    # The ABSOLUTE level, before any baseline is removed. Printed because
+    # _currentFast.csv stores raw counts and every later table is baseline-relative, so
+    # a bench test against a known applied voltage has nothing to compare otherwise.
+    st_all = stats(ct)
+    lines.append("  absolute level    : mean %.1f counts = %.3f mA  (sd %.1f, "
+                 "median %.0f)  <- compare a bench DC input HERE, before baseline removal"
+                 % (st_all["mean"], st_all["mean"] * k, st_all["sd"], st_all["median"]))
+    lines.append("     a DC input of V volts should read V / %.4f * %.0f counts"
+                 % (cal["vref"], cal["adc_max"]))
     if nz > 0.2 * n:
         lines.append("  WARNING: >20%% exact zeros. A large population of exact zeros with")
         lines.append("  excursions to the true level indicates an INTERMITTENT CONNECTION,")
@@ -930,6 +944,10 @@ def report(path, args):
         baseline, bidx, bwarn = estimate_baseline(ts, ct)
         bnoise = stats(quietest_window(ts, ct))["sd"]
         bsrc = "auto (lowest 1-s bin median, bin %d)" % bidx
+    if getattr(args, "no_baseline", False):
+        # Absolute mode: report what the ADC actually sees. Used for bench calibration
+        # against a known input, where the offset IS the measurement.
+        baseline, bsrc = 0.0, "disabled by --no-baseline (absolute counts)"
     lines.append("")
     lines.append(hr("BASELINE"))
     lines.append("  estimate : %.2f counts = %.4f mA   [%s]" % (baseline, baseline * k, bsrc))
@@ -941,6 +959,25 @@ def report(path, args):
     # Printed BEFORE the filter tables on purpose. If the front end clipped or the offset
     # ate the range, nothing below this point can be fixed by choosing a better window,
     # and reading the filter numbers first sends you chasing the wrong thing.
+    # A constant-DC bench capture is the one input this tool will silently destroy: the
+    # baseline estimator takes the lowest 1-s bin median, which on a flat record IS the
+    # signal, so step 4 subtracts the whole thing and every later number reads ~0. That
+    # is correct behaviour for a deployment log and exactly wrong for a calibration
+    # check, and nothing else in the report says so.
+    bins = bin_medians(ts, ct)
+    if len(bins) >= 2 and baseline > 0:
+        meds = sorted(_median(vals) for _, vals in bins)
+        span = meds[-1] - meds[0]
+        if span < 0.05 * baseline:
+            lines.append("")
+            lines.append("  *** CONSTANT-DC CAPTURE DETECTED. The 1-s bin medians span only")
+            lines.append("  *** %.1f counts (%.2f%% of the %.0f-count level), i.e. there is no"
+                         % (span, 100.0 * span / baseline, baseline))
+            lines.append("  *** event in this record - the whole capture IS the baseline.")
+            lines.append("  *** Step 4 below will subtract it and leave ~0 mA. For a bench")
+            lines.append("  *** check against a known applied voltage, read 'absolute level'")
+            lines.append("  *** above, or re-run with --no-baseline to keep the DC level.")
+
     _report_range(lines, ts, ct, cal, k, baseline)
 
     _report_mean_preservation(lines, steadiest_high_plateau(ts, ct))
@@ -1604,6 +1641,11 @@ def main():
                     help="local UTC offset attached to rtcEvt time (default %(default)s)")
     ap.add_argument("--write-csv", default=None, metavar="OUT",
                     help="write raw+filtered columns, including local wall time, to OUT")
+    ap.add_argument("--no-baseline", action="store_true",
+                    help="do not remove the idle offset - report the ABSOLUTE level. Use "
+                         "this for a bench check against a known applied voltage, where "
+                         "the DC level is the measurement and the usual baseline "
+                         "subtraction would remove all of it.")
     ap.add_argument("--clamp-baseline", action="store_true",
                     help="re-enable the pre-2026-09-11 clamp-at-zero baseline "
                          "subtraction. For reproducing old numbers ONLY - it biases every "

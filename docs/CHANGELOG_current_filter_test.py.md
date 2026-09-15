@@ -4,6 +4,24 @@ Newest entries first. This changelog records why changes were made as well as wh
 
 ---
 
+## 2026-09-15 — Say the absolute level, and stop silently erasing a constant-DC capture — `[UNCONFIRMED]`
+
+A bench calibration capture (a power supply on A14, a meter confirming the pin) came out of
+this tool reading ~0 mA. The tool was working exactly as designed, which is the problem:
+`estimate_baseline()` takes the lowest 1-s bin median, and on a flat record that IS the
+signal, so step 4 subtracts the whole thing. Correct for a deployment log, exactly wrong for
+a calibration check, and nothing in the report said which one it thought it had.
+
+Two additions. The INPUT block now prints the **absolute level** — mean counts, mean mA, sd,
+median — before any baseline is removed, with the counts-per-volt relation next to it, so a
+known applied voltage has something to be compared against (`_currentFast.csv` stores raw
+counts and every later table is baseline-relative). And a **constant-DC detector**: when the
+1-s bin medians span under 5 % of the baseline there is no event in the record, so the report
+says so in the BASELINE block and points at `--no-baseline`, which is the new flag for
+absolute mode.
+
+---
+
 ## 2026-09-11 (later) — Decimate like the scope; stop rewriting saturation as noise — `[UNCONFIRMED]`
 
 Driven by a real field capture, `09111632_currentFast.csv`, whose filtered trace was a red

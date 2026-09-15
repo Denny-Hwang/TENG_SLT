@@ -595,6 +595,50 @@ def parse_binary_file(bin_path: str) -> dict:
                 data['errors'].append(
                     f"{len(data['battery_cal'])} BATTERY_CAL records found; "
                     "used the first. Was this log concatenated from two sessions?")
+
+            # ---- Is the battery channel inside the ADC's range at all? ----------
+            # The divider exists because the ADC reference is ~1.98 V and a 1S cell is
+            # up to 3.65 V. If the divider is bypassed, open, or wired to the wrong node,
+            # the pad sits above the reference, every conversion pins at full scale, and
+            # the log reports a CONSTANT voltage that looks like a plausible number
+            # (adc_max x vref x div_ratio = the divider's full-scale, ~3.95 V here).
+            # That is the failure a multimeter cannot see: the meter reads the source
+            # correctly while the pad is the thing that is out of range.
+            n_pinned = sum(1 for r in data['battery_voltage']
+                           if r['counts'] >= adc_max)
+            if n_pinned:
+                fs_v = adc_max * scale
+                data['errors'].append(
+                    f"BATTERY CHANNEL SATURATED: {n_pinned} of "
+                    f"{len(data['battery_voltage'])} samples pinned at {adc_max:.0f} "
+                    f"counts, which converts to {fs_v:.2f} V and is a FLOOR, not a "
+                    "reading - the true voltage is anything at or above it. The pad is "
+                    f"above the {cal['vref']:.2f} V ADC reference. With the "
+                    f"{cal['div_ratio']:.3f}:1 divider the pad must stay under "
+                    f"{cal['vref']:.2f} V, i.e. the battery node under {fs_v:.2f} V, so "
+                    "check that the supply feeds the DIVIDER INPUT and not the ADC pad "
+                    "directly, and that neither resistor is open.")
+
+            # A 1S LiFePO4 cell lives between ~2.5 V (empty) and 3.65 V (charge
+            # termination). A steady reading outside that says the divider ratio in the
+            # cal record does not match the resistors actually fitted - which is exactly
+            # what a rebuilt divider gets wrong, and it scales the answer rather than
+            # breaking it, so nothing else flags it.
+            volts = [r['voltage_V'] for r in data['battery_voltage']
+                     if r['voltage_V'] is not None]
+            if volts and not n_pinned:
+                lo, hi = min(volts), max(volts)
+                if lo > 3.8 or hi < 2.0:
+                    data['errors'].append(
+                        f"BATTERY VOLTAGE IMPLAUSIBLE: {lo:.2f}-{hi:.2f} V, outside the "
+                        "~2.5-3.65 V a 1S LiFePO4 cell can occupy. The counts are "
+                        "believable, so suspect the conversion rather than the ADC: "
+                        f"div_ratio in the log is {cal['div_ratio']:.4f} "
+                        f"(R_top {cal['r_top_ohm']:.0f}, R_bottom "
+                        f"{cal['r_bottom_ohm']:.0f}). If the divider was rebuilt with "
+                        "different resistors, BATTERY_R_TOP_OHM / BATTERY_R_BOTTOM_OHM "
+                        "in the firmware must be updated to match - the ratio is "
+                        "compiled into the log, not measured.")
         else:
             data['errors'].append(
                 "No BATTERY_CAL record in log — battery voltage is reported as "

@@ -5,6 +5,27 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 — Bench calibration reads: absolute mode, and battery range checks
+
+A rebuilt divider and a fresh bench test (3.3 V battery side, 1.1 V current side, both
+confirmed on a meter) exposed three places where the tooling could not tell a calibration
+check from a deployment log.
+
+`current_filter_test.py` now prints the **absolute level** in mA before baseline removal and
+detects a constant-DC capture, which it used to subtract away to ~0 mA in silence;
+`--no-baseline` is the explicit absolute mode.
+
+`vertisea_protocol.py` now range-checks the battery channel: a **saturated** channel (the
+supply reaching the ADC pad rather than the divider input, which pins the log at a constant
+3.95 V that looks like a real number) and an **implausible** voltage for a 1S LiFePO4 cell,
+which is what a rebuilt divider produces when the firmware still carries the old resistor
+values — `div_ratio` is compiled in, not measured.
+
+Reference numbers for this board: 1.100 V on A14 = 9137 counts = 110.0 mA; 3.300 V at the
+divider input = 1.652 V at the pad = 13 686 counts = 3.300 V.
+
+---
+
 ## 2026-09-14 — Session flags leave the source tree
 
 Second `git pull` conflict on `VertiSea.ino` in a week, same cause: deployment flags edited
