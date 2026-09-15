@@ -2828,9 +2828,18 @@ saturates once the divider input passes 3.956 V.
 
 ---
 
-### Issue 69 — 🟠 High: "the MCU cannot measure voltage and current at once" — it can; the interaction is in the wiring
+### Issue 69 — RESOLVED: the channel interaction was grounding, not the MCU
 
-**Reported:** 2026-09-15 — each supply alone reads correctly, both together and neither does.
+**Reported 2026-09-15** — each supply alone reads correctly, both together and neither does,
+concluded as "the MCU cannot measure voltage and current at the same time".
+
+**Resolved the same day by correcting the grounding.** The 18:03 capture is the proof, and it
+is a clean one: the battery channel sat pinned at 16 383 for five seconds **before** the
+current channel was energised at all, and when the current channel came up it read
+**9 130 counts = 1.099 V = 109.9 mA** against 1.100 V applied — correct to 0.1 % — and stayed
+correct for the rest of the run while the battery channel remained pinned. **Two faults that
+no longer move together are two independent channels.** The interaction is gone. What remains
+on the battery side is Issue 70 and has nothing to do with the current channel.
 
 **The MCU claim is disproved by this project's own data.** `docs/adc_calibration.md` §3.1–3.2
 records three 120 s captures with **both channels driven simultaneously from separate bench
@@ -2848,47 +2857,70 @@ time and `analogRead()` reconfigures the slot per call, which is time-multiplexi
 restriction. So the channels interacting is a property of the wiring in front of them, not
 of the MCU.
 
-**What the 2026-09-15 log actually shows.** Decoded, every row has at most **one** channel
-energised — `A14=0, A15≈14 900` or `A14≈9 050, A15≈0` — apart from single transition seconds
-(`A14=5371 A15=3643`) caught mid-switch. **There is no steady-state row with both channels
-driven**, so this log does not yet demonstrate the fault; it demonstrates the toggling. It
-does contain six consecutive seconds of `A15=16383` (pinned above the reference) which is
-worth explaining on its own.
+**Two wrong hypotheses, one habit.** I proposed a ground loop, then — after being told the
+grounds were shared — a dual-output supply in SERIES/TRACKING mode, with arithmetic that fit
+the observed 4.40 V saturation neatly. Both were attempts to explain the two channels as one
+coupled system, and the withdrawn Issue 68 was the same mistake in a different costume. The
+evidence never showed more than a shared return. Fitting arithmetic is not evidence when the
+model was chosen to fit.
 
-**The grounds are shared, so it is not a ground loop.** Confirmed 2026-09-15. That removes
-the hypothesis this issue opened with and leaves a sharper one.
+**Worth keeping from the chase:** `vertisea_protocol.py` groups battery samples by the current
+level in force at the same instant and reports the shift, so channel interaction is answerable
+from any log that carries both channels. It reports rather than diagnoses, because on a
+deployment log the same number is the cell sagging under harvested current — real, and the
+thing this system exists to measure.
 
-**Leading hypothesis: the two supply outputs are not independent.** A dual-output bench
-supply in SERIES or TRACKING mode stacks one output on the other, so the node the board sees
-is the sum. That single assumption reproduces all three observed phases to within millivolts:
+---
 
-| phase | model | predicted | observed |
-|---|---|---|---|
-| current only (3.3 V ch off) | A14 = 1.1 V | 9 137 counts | **9 050** (1.0943 V) |
-| battery only (1.1 V ch off, output floating ≈ 0.30 V) | node = 3.30 + 0.30 = 3.60 V → pad 1.798 V | 14 900 counts | **≈14 900** |
-| both on | node = 3.30 + 1.10 = **4.40 V** → pad 2.199 V, **above the 1.977 V reference** | pinned 16 383 | **16 383 for 6 s** |
+### Issue 70 — 🟠 High: the battery divider is not dividing — the pad sees the whole source
 
-The saturation threshold is a divider input of **3.956 V**; 4.40 V is past it, which is why
-that phase reads a flat 16 383 and why the battery value is a floor rather than a
-measurement. Nothing about the ADC produces that pattern — it is arithmetic on the supply.
+**Found:** 2026-09-15, the 18:03 capture, with grounding corrected and the current channel
+verified good.
 
-**Check first, in order:**
+`A15` pins at **16 383** from the instant the source is connected and never moves.
 
-1. **The supply's output mode** — INDEP vs SERIES vs TRACKING/PARALLEL. This is the one
-   hypothesis that predicts the 4.40 V saturation quantitatively.
-2. **Measure the divider input against board GND with both channels live.** If it reads
-   ≈4.4 V rather than 3.3 V, the supply is stacking and the board is innocent.
-3. Only if both come back clean: look for a path tying the two sense nodes together on the
-   harvester board.
+| | pad | divider input |
+|---|---|---|
+| 3.300 V through the 2.001:1 divider | 1.649 V | 3.300 V → **13 666 counts** |
+| **observed** | **≥1.977 V** | **≥3.956 V** → **16 383, pinned** |
+| 3.300 V arriving at the pad undivided | 3.300 V | — → **pinned**, matches |
 
-**Measurement added rather than argument.** Both channels are already in every log — battery
-at 1 Hz (0x14), current at ~800 Hz (0x0E) — so `vertisea_protocol.py` now groups battery
-samples by the current level in force at the same instant and reports the shift. On a
-deployment log a battery that sags under harvested current is **real** (cell internal
-resistance, which this system exists to measure); on a bench capture with a supply holding
-the node fixed, the same number can only be the inputs interacting. The log cannot tell those
-apart, so the note prints the measurement and names both readings.
+The resistors measure 98.9 kΩ / 98.8 kΩ (Issue 68), so the divider *as a pair of components*
+is fine. What is not fine is that the pad sits at very nearly the full source voltage, which
+means the bottom leg is doing nothing: **an open R_bottom, or an open ground return on
+R_bottom, leaves the pad floating up to the source through R_top.** That is the usual outcome
+of reworking grounding, which is exactly what just happened.
 
-**Decisive test:** both supplies on, **untouched for 60 s**, `USB_DEBUG 1`. Both channels
-steady and correct at once → wiring was marginal, not a design fault. One collapses → tie
-both supply returns to a single board GND point and repeat.
+The reading is a **floor, not a measurement** — the true voltage is anything at or above
+3.956 V — so no post-processing can recover it.
+
+**Check with the supply OFF, meter on resistance:**
+
+| from | to | expect |
+|---|---|---|
+| ADC pad (A15, Apollo3 pad 32) | board GND | **~98.8 kΩ** — infinite means the bottom leg is open |
+| ADC pad | divider input | ~98.9 kΩ |
+| divider input | board GND | ~197.7 kΩ |
+
+Then with the supply on, the pad must read **~1.65 V**, not 3.3 V.
+
+`vertisea_protocol.py` prints these expected resistances in the saturation warning, derived
+from the `r_top_ohm` / `r_bottom_ohm` the log already carries, so the check needs no external
+reference.
+
+---
+
+### Issue 71 — 🟡 Medium: the current channel drifts ~24 % on a fixed bench input
+
+**Found:** 2026-09-15, same capture, noticed while confirming the current channel.
+
+With a fixed 1.100 V applied, `A14` reads 9 040 → 9 463 → 9 923 → 10 490 → **11 200** over
+about eight seconds, then settles back to ~9 740–9 814. That is **1.088 V → 1.348 V, +23.9 %**,
+well outside the ±0.1 % the same channel showed in its first seconds (9 130 counts = 1.099 V
+against 1.100 V applied).
+
+Most likely the supply was being adjusted during the run — the excursion is smooth and
+one-directional, which is what a knob looks like and not what noise looks like. Worth one
+deliberate check before dismissing it, because a 24 % drift on a fixed input would invalidate
+every harvested-current number this system produces: apply 1.100 V, **touch nothing**, and
+watch the `A14=` line for 60 s. It should hold 9 137 ± 20.
