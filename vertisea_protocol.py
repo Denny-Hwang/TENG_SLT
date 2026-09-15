@@ -650,7 +650,8 @@ def parse_binary_file(bin_path: str) -> dict:
                     "channel from 11 270 to 13 399 counts in one session, recovering "
                     "89 % of it (Issues 72, 74). Fit the capacitor - it droops ~0.01 % "
                     "per conversion and recovers in ~5 ms against a 1 s interval, so it "
-                    "costs nothing here, and 1 uF is safer still. Logs taken without it "
+                    "costs nothing here; 2.2 uF ceramic is the recommended part - see "
+                    "docs/adc_calibration.md for the sizing table. Logs taken without it "
                     "read low by this fraction and should be scaled, not trusted.")
 
             n_pinned = sum(1 for r in data['battery_voltage']

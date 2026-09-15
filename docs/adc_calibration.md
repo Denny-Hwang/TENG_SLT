@@ -34,7 +34,49 @@ non-linearity was detected at the 3-point level.
 > IDENTIFIED_ISSUES.md Issue 72. Fit 0.1 µF from the ADC pad to GND before trusting a
 > divider-fed channel.
 
-*Effective reference* = 2.000 V / gain. Substituting it for the nominal 2.0 V in
+*Effective reference* = 2.000 V / gain.
+
+### Choosing the pad capacitor (battery channel)
+
+Required because the divider's Thevenin impedance is 49.4 kΩ (98.9 k ∥ 98.8 k) and the
+Apollo3 SAR cannot charge its sample capacitor through that — measured at **−17.5 %** without
+one, **−1.95 %** with 0.1 µF held at the pad (Issue 72). Anything in this range works; the
+table is for choosing deliberately rather than by what is in the drawer.
+
+| C | τ = 49.4 kΩ·C | settle (5τ) | droop/conversion | −3 dB |
+|---|---|---|---|---|
+| 0.1 µF | 4.9 ms | 25 ms | 0.010 % | 32.2 Hz |
+| 1 µF | 49 ms | 247 ms | 0.0010 % | 3.22 Hz |
+| **2.2 µF** | **109 ms** | **544 ms** | **0.00045 %** | **1.46 Hz** |
+| 10 µF | 494 ms | 2.5 s | 0.00010 % | 0.32 Hz |
+
+The battery channel samples at **1 Hz**, so the constraint is just that the capacitor settle
+between samples — every value above does, with margin. Droop is irrelevant at all of them: a
+~10 pF sample capacitor cannot move a 0.1 µF reservoir, let alone a 2.2 µF one.
+
+**Bigger is better here, up to a point.** At 1 Hz sampling the Nyquist limit is 0.5 Hz, and
+with 0.1 µF everything from 0.5 Hz to 32 Hz aliases into the battery record. 2.2 µF pulls the
+corner to 1.46 Hz and kills most of that; 10 µF puts it under Nyquist and makes the RC a
+genuine anti-alias filter. The cost is response time to a *real* change in cell voltage —
+544 ms to settle at 2.2 µF, 2.5 s at 10 µF. Since the channel is sampled once a second,
+2.2 µF costs nothing that the sampling rate does not already cost, and **10 µF starts to
+smear the load-sag transient the channel exists to show.**
+
+**Use a ceramic (X7R/X5R), not electrolytic or tantalum.** Leakage into the pad is multiplied
+by the 49.4 kΩ source impedance, and that produces exactly the kind of fixed scale error this
+section exists to warn about:
+
+| leakage | offset at the pad | error on 1.65 V |
+|---|---|---|
+| 1 nA (ceramic) | 0.05 mV | +0.003 % |
+| 70 nA (2.2 µF electrolytic) | 3.5 mV | +0.21 % |
+| 1 µA (a tired tantalum) | 49 mV | **+3.0 %** |
+
+Ceramic DC-bias derating is not a concern: even a small-package 2.2 µF X5R losing 80 % of its
+value at 1.65 V bias still leaves 0.44 µF, four times the part that already recovered 89 % of
+the deficit.
+
+ Substituting it for the nominal 2.0 V in
 `counts × VREF / 16383` corrects the channel with **no other change** to the conversion chain,
 which is how `VertiSea.ino` applies it (Section 5).
 

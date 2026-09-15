@@ -3067,6 +3067,13 @@ something else. In order of likelihood:
 adequate for state-of-charge and not adequate for the ADC-gain calibration numbers in
 `docs/adc_calibration.md` to mean anything on this path.
 
-**1 µF is the safer part** if it fits: 0.001 % droop, 49 ms recovery, still 20 time constants
-inside a 1 s interval. There is no reason to be stingy here — the capacitor is only ever
-charged through 49.4 kΩ at 1 Hz.
+**Sizing:** anything from 0.1 µF to a few µF works — see the table in
+`docs/adc_calibration.md`. **2.2 µF ceramic is the recommendation**: 0.00045 % droop, 544 ms
+to settle against a 1 s sampling interval, and a −3 dB corner at 1.46 Hz that also suppresses
+most of what would otherwise alias into a 1 Hz channel (Nyquist is 0.5 Hz; 0.1 µF leaves the
+corner at 32 Hz). Do not go much beyond that — 10 µF puts the corner under Nyquist but takes
+2.5 s to settle, which smears the load-sag transient the channel exists to show.
+
+**Ceramic X7R/X5R, not electrolytic or tantalum.** Leakage into the pad is multiplied by the
+49.4 kΩ source impedance: 1 nA is 0.05 mV, but 1 µA is 49 mV — a 3 % scale error, i.e. the
+same class of bug this issue is about.
