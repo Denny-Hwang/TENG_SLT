@@ -644,13 +644,14 @@ def parse_binary_file(bin_path: str) -> dict:
                     "Apollo3 SAR wants. Its switched-cap input looks like ~83 kohm during "
                     "the sample window, so a source this stiff does not settle and the "
                     "channel reads LOW by a fixed fraction - which looks exactly like a "
-                    "wrong divider ratio until you meter the pad. CONFIRMED on this "
-                    "board 2026-09-15: pad metered at 1.65 V while the ADC reported "
-                    "1.36 V, a 17.6 % deficit (Issue 72). Fit 0.1 uF from the ADC pad to "
-                    "GND - it gives the sample cap a local charge reservoir, droops "
-                    "~0.01 % per conversion and recovers in ~5 ms against a 1 s sampling "
-                    "interval, so it costs nothing here. Logs taken before that cap is "
-                    "fitted read low by this fraction and should be scaled, not trusted.")
+                    "wrong divider ratio until you meter the pad. MEASURED on this board "
+                    "2026-09-15: pad metered at 1.65 V while the ADC reported 1.36 V, a "
+                    "17.5 % deficit; adding 0.1 uF from the pad to GND moved the same "
+                    "channel from 11 270 to 13 399 counts in one session, recovering "
+                    "89 % of it (Issues 72, 74). Fit the capacitor - it droops ~0.01 % "
+                    "per conversion and recovers in ~5 ms against a 1 s interval, so it "
+                    "costs nothing here, and 1 uF is safer still. Logs taken without it "
+                    "read low by this fraction and should be scaled, not trusted.")
 
             n_pinned = sum(1 for r in data['battery_voltage']
                            if r['counts'] >= adc_max)

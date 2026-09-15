@@ -2936,7 +2936,7 @@ the room; guessing which it was would have been worth nothing either way.
 
 ---
 
-### Issue 72 — ✅ DIAGNOSED: the ADC cannot charge through a 49.4 kΩ divider (fix: 0.1 µF at the pad)
+### Issue 72 — ✅ CONFIRMED AND FIXED: 0.1 µF at the pad recovers 89 % of a 17.6 % deficit
 
 **Found:** 2026-09-15, the 18:18 capture — the first run in which **both channels read sane
 values at the same time**, which is itself the final confirmation that Issue 69 is closed:
@@ -3010,3 +3010,63 @@ every conversion carries the same deficit and only hardware fixes it. One line o
 settles a question that theory about switched-capacitor front ends cannot.
 
 The parser flags any divider whose Thevenin exceeds 10 kΩ and now cites this measurement.
+
+
+---
+
+### Issue 73 — ✅ CONFIRMED ON HARDWARE: the SD recovery state machine works in the field
+
+**Observed:** 2026-09-15, 18:18 capture, mid-run while the board was being handled.
+
+```
+ERROR: SD sector write failed — logging stopped. Telemetry continues.
+SD recovery attempt 1
+SD recovery OK, now logging to LOG00014.BIN
+SDq=1005B high=1020 loopUs=648061 maxWriteUs=11022 overruns=0
+```
+
+**This is Issue 53's fix executing on real hardware for the first time.** Before it,
+`sdError` was a one-way latch: a single failed sector write ended logging for the remainder
+of the deployment, with no path back. Here the write failed, the state machine closed the
+handle, re-ran `SD.begin()`, took the next free counter name, re-emitted the boot records so
+the new file is self-describing, and carried on — `overruns=0`, no data loss beyond the
+in-flight sector.
+
+**Cost:** that loop pass took **648 ms** (`loopUs=648061`), which is a visible heartbeat
+freeze — `SD.begin()` plus the filename scan plus the boot records. One-off and bounded, and
+the alternative was losing the rest of the run.
+
+**Caveat on what this proves.** The fault was almost certainly provoked by handling: the
+capacitor was being held against the pins at the time, so a nudged card or a supply glitch is
+the likely trigger. That makes it a real-world validation of the *recovery path*, not evidence
+about how often a card fails on its own.
+
+**Consequence for parsing:** the run is now split across two files, and the second carries its
+own calibration records. `vertisea_protocol.py` already warns that sibling files exist when
+`sd_recoveries` is non-zero.
+
+---
+
+### Issue 74 — 🟡 Medium: ~2 % residual on the battery channel after the capacitor
+
+With 0.1 µF held at the pad the battery channel reads **13 399 counts = 3.236 V** at the
+divider input against 3.300 V applied — **−1.95 %**, down from −17.5 %.
+
+The mechanism cannot account for it: 0.1 µF against a ~10 pF sample capacitor droops **0.01 %**
+per conversion and recovers in 4.9 ms against a 1 s sampling interval. So the residual is
+something else. In order of likelihood:
+
+1. **The capacitor was held, not soldered** — "잠깐 임시로 대보았어". Contact resistance and
+   lead length in series with the cap defeat part of its purpose.
+2. **The source is not exactly 3.300 V.** −1.95 % of 3.300 V is 64 mV; a supply's front panel
+   is not a calibration reference.
+3. A genuine residual in the conversion chain.
+
+**To close it:** solder the capacitor, meter the source with a DMM, and compare. Expect
+**13 666 ± 30 counts** for a metered 3.300 V. Until then the channel is good to ~2 %, which is
+adequate for state-of-charge and not adequate for the ADC-gain calibration numbers in
+`docs/adc_calibration.md` to mean anything on this path.
+
+**1 µF is the safer part** if it fits: 0.001 % droop, 49 ms recovery, still 20 time constants
+inside a 1 s interval. There is no reason to be stingy here — the capacitor is only ever
+charged through 49.4 kΩ at 1 Hz.

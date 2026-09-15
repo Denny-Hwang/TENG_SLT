@@ -5,6 +5,28 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (confirmed) — The capacitor fixes it; SD recovery ran for real
+
+**Issue 72 closed by A/B in a single session, seconds apart, same wiring:**
+
+| | counts | divider input | error |
+|---|---|---|---|
+| no capacitor | 11 270 | 2.722 V | −17.5 % |
+| **0.1 µF at the pad** | **13 399** | **3.236 V** | **−1.95 %** |
+| capacitor removed again | 11 264 | 2.720 V | −17.6 % |
+
+89 % of the deficit recovered, and the error returns the moment the capacitor comes off.
+The mechanism is confirmed: the Apollo3 SAR could not charge its sample capacitor through a
+49.4 kΩ divider. Fit the capacitor permanently — 1 µF is safer still and costs nothing at 1 Hz.
+The ~2 % residual is Issue 74, most likely the capacitor being *held* rather than soldered.
+
+**Issue 53's SD recovery executed on hardware for the first time** during the same run: a
+sector write failed, the state machine remounted the card, opened `LOG00014.BIN`, re-emitted
+the boot records and carried on with `overruns=0`. The recovery pass cost 648 ms — a visible
+heartbeat freeze, against the alternative of losing the rest of the deployment. Issue 73.
+
+---
+
 ## 2026-09-15 (diagnosed) — The ADC cannot charge through the battery divider
 
 Meter on the ADC pad: **1.65 V**. Log: **1.36 V**. The divider is correct; the ADC is not
