@@ -2795,36 +2795,36 @@ remaining `[UNCONFIRMED]` piece: it needs one boot with the slot empty and the 4
 
 ---
 
-### Issue 68 — 🟡 Medium: the battery divider was rebuilt without updating the firmware constants
+### Issue 68 — ⚪ WITHDRAWN: the battery divider constants are correct
 
-**Found:** 2026-09-15, bench session, from the `USB_DEBUG` line.
+**Raised and withdrawn 2026-09-15.**
 
-With a 3.30 V source on the battery input, `A15` reads a steady **≈14 900 counts**. Expected
-is **13 686**.
+I claimed the divider had been rebuilt without updating `BATTERY_R_TOP_OHM` /
+`BATTERY_R_BOTTOM_OHM`, deriving an "implied 1.835:1" from the assumption that the source
+was 3.30 V. The resistors were then measured: **98.9 kΩ and 98.8 kΩ**.
 
-| | counts | pad volts | reported |
-|---|---|---|---|
-| expected (3.30 V through a 1.998:1 divider) | 13 686 | 1.6517 V | 3.300 V |
-| **observed** | **≈14 900** | **1.7995 V** | **3.595 V** |
+| | ratio | vs the firmware's 1.99798 |
+|---|---|---|
+| R_top 98.9 k, R_bottom 98.8 k | 2.00101 | −0.15 % |
+| R_top 98.8 k, R_bottom 98.9 k | 1.99899 | −0.05 % |
 
-The pad is at 1.7995 V, so for a 3.30 V source the divider actually fitted is
-**3.30 / 1.7995 = 1.835:1**, not the 1.998:1 the firmware carries. The reading is
-**+8.9 %** and it is a clean scale error, not noise — the counts are rock steady across
-twenty-plus seconds.
+Either orientation is within 0.15 % of the compiled value. **There is no divider-constant
+error.** The reasoning inverted a known and an unknown: the source voltage was the assumption
+and the ratio was the measurement, and I treated it the other way round.
 
-`BATTERY_DIV_RATIO` is computed from `BATTERY_R_TOP_OHM` / `BATTERY_R_BOTTOM_OHM` at compile
-time and written into `TYPE_BATTERY_CAL`, so the parser faithfully reproduces the firmware's
-wrong ratio. Nothing else catches it: the ADC is in range, the counts are plausible, and
-3.59 V is a believable number for a 1S cell. This is the exact failure mode the
-2026-09-15 `BATTERY VOLTAGE IMPLAUSIBLE` check was added for — and it does **not** fire here,
-because 3.59 V falls inside the 2.0–3.8 V plausibility band. A scale error that lands inside
-the plausible range is only catchable against a known input.
+What the counts actually say, with the ratio now confirmed, is that the divider input really
+was at **3.60 V** — see Issue 69. The arithmetic was right; the thing it was solved for was
+wrong.
 
-**Fix:** measure the two resistors actually fitted, put them in `BATTERY_R_TOP_OHM` /
-`BATTERY_R_BOTTOM_OHM`, reflash. Or derive the ratio from the bench reading itself:
-`ratio = V_source / (counts × VREF_A15 / 16383)`. Logs written before the reflash are
-correctable after the fact — multiply `voltage_V` by `ratio_true / ratio_logged`, since the
-log carries the ratio it used.
+`vertisea_protocol.py` now reports the implied divider-input voltage on every log, so this
+conversion is never done by hand again:
+
+```
+Battery channel: 14946 counts mean (range 14870-15074) = 1.8037 V at the ADC pad
+= 3.609 V at the divider input, using the 2.0010:1 ratio the log carries.
+On a bench test compare that last number with the supply setting; the pad
+saturates once the divider input passes 3.956 V.
+```
 
 ---
 
@@ -2855,11 +2855,31 @@ driven**, so this log does not yet demonstrate the fault; it demonstrates the to
 does contain six consecutive seconds of `A15=16383` (pinned above the reference) which is
 worth explaining on its own.
 
-**Leading hypothesis: a shared return.** Two bench supplies whose negatives meet the board at
-different points, or sense nodes tied together on the harvester board, put a common-mode
-offset on both inputs when both are live — which pushes one input up (the `A15=16383` phase)
-and the other below ground (`A14=0`). That matches "each alone is fine, both together is not"
-exactly, and no ADC behaviour does.
+**The grounds are shared, so it is not a ground loop.** Confirmed 2026-09-15. That removes
+the hypothesis this issue opened with and leaves a sharper one.
+
+**Leading hypothesis: the two supply outputs are not independent.** A dual-output bench
+supply in SERIES or TRACKING mode stacks one output on the other, so the node the board sees
+is the sum. That single assumption reproduces all three observed phases to within millivolts:
+
+| phase | model | predicted | observed |
+|---|---|---|---|
+| current only (3.3 V ch off) | A14 = 1.1 V | 9 137 counts | **9 050** (1.0943 V) |
+| battery only (1.1 V ch off, output floating ≈ 0.30 V) | node = 3.30 + 0.30 = 3.60 V → pad 1.798 V | 14 900 counts | **≈14 900** |
+| both on | node = 3.30 + 1.10 = **4.40 V** → pad 2.199 V, **above the 1.977 V reference** | pinned 16 383 | **16 383 for 6 s** |
+
+The saturation threshold is a divider input of **3.956 V**; 4.40 V is past it, which is why
+that phase reads a flat 16 383 and why the battery value is a floor rather than a
+measurement. Nothing about the ADC produces that pattern — it is arithmetic on the supply.
+
+**Check first, in order:**
+
+1. **The supply's output mode** — INDEP vs SERIES vs TRACKING/PARALLEL. This is the one
+   hypothesis that predicts the 4.40 V saturation quantitatively.
+2. **Measure the divider input against board GND with both channels live.** If it reads
+   ≈4.4 V rather than 3.3 V, the supply is stacking and the board is innocent.
+3. Only if both come back clean: look for a path tying the two sense nodes together on the
+   harvester board.
 
 **Measurement added rather than argument.** Both channels are already in every log — battery
 at 1 Hz (0x14), current at ~800 Hz (0x0E) — so `vertisea_protocol.py` now groups battery

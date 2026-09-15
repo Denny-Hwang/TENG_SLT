@@ -5,6 +5,26 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (correction) — The divider is fine; the supply is stacking
+
+The resistors were measured: **98.9 kΩ / 98.8 kΩ**, a ratio of 2.001 against the firmware's
+1.998 — within 0.15 %. Yesterday's "the divider was rebuilt without updating the firmware"
+finding is **withdrawn** (Issue 68). It solved the right equation for the wrong unknown:
+the source voltage was the assumption and the ratio was the measurement, and I inverted them.
+
+With the ratio confirmed, the counts say the divider input really was at **3.60 V**, not the
+3.30 V that was set. The grounds are shared, which also removes the ground-loop hypothesis.
+What remains fits a **dual-output supply in SERIES or TRACKING mode**, and it fits
+quantitatively: 3.30 + 1.10 = 4.40 V at the divider input → 2.199 V at the pad → above the
+1.977 V reference → the flat 16 383 seen for six seconds. Battery-only with the other channel
+floating at ≈0.30 V gives 3.60 V, which is exactly what was logged. Issue 69.
+
+`vertisea_protocol.py` now prints the implied divider-input voltage on every log, so the two
+conversions from raw counts to "what the supply must be putting out" never have to be done by
+hand again.
+
+---
+
 ## 2026-09-15 (later) — The two ADC channels do not interfere in the MCU; measure the interaction instead
 
 Bench report: each supply alone reads correctly, both together and neither does — concluded

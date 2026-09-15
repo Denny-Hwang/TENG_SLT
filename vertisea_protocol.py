@@ -605,6 +605,25 @@ def parse_binary_file(bin_path: str) -> dict:
             # (adc_max x vref x div_ratio = the divider's full-scale, ~3.95 V here).
             # That is the failure a multimeter cannot see: the meter reads the source
             # correctly while the pad is the thing that is out of range.
+            # What voltage does the log imply at the DIVIDER INPUT? On a bench test that
+            # is the number to compare with the supply's front panel, and it is two
+            # conversions away from the raw counts, so nobody does it by hand. A steady
+            # level that disagrees with the set voltage says the node is not where it is
+            # believed to be - which no other check can see, because the counts are
+            # perfectly well-behaved.
+            counts_all = [r['counts'] for r in data['battery_voltage']]
+            if counts_all:
+                lo_c, hi_c = min(counts_all), max(counts_all)
+                mean_c = sum(counts_all) / len(counts_all)
+                v_pad = mean_c * cal['vref'] / adc_max if adc_max else 0.0
+                data['notes'].append(
+                    f"Battery channel: {mean_c:.0f} counts mean "
+                    f"(range {lo_c}-{hi_c}) = {v_pad:.4f} V at the ADC pad = "
+                    f"{mean_c * scale:.3f} V at the divider input, using the "
+                    f"{cal['div_ratio']:.4f}:1 ratio the log carries. On a bench test "
+                    "compare that last number with the supply setting; the pad saturates "
+                    f"once the divider input passes {adc_max * scale:.3f} V.")
+
             n_pinned = sum(1 for r in data['battery_voltage']
                            if r['counts'] >= adc_max)
             if n_pinned:
