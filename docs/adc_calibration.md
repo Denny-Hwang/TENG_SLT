@@ -76,6 +76,46 @@ Ceramic DC-bias derating is not a concern: even a small-package 2.2 µF X5R losi
 value at 1.65 V bias still leaves 0.44 µF, four times the part that already recovered 89 % of
 the deficit.
 
+#### Why not an aluminium electrolytic
+
+A cylindrical aluminium 2.2 µF will *work* on the bench and is the wrong part to leave fitted.
+Its leakage is a load on a 49.4 kΩ source:
+
+| leakage at 1.65 V | equivalent shunt | effective R_bottom | counts | error |
+|---|---|---|---|---|
+| 1 nA — ceramic X7R | 1649 MΩ | 98.79 k | 13 665 | −0.01 % |
+| 10 nA — good aluminium at low bias | 165 MΩ | 98.74 k | 13 662 | −0.03 % |
+| 100 nA — aluminium, warm | 16.5 MΩ | 98.21 k | 13 625 | −0.30 % |
+| 500 nA — aluminium, hot or aged | 3.3 MΩ | 95.93 k | 13 464 | **−1.48 %** |
+| 3 µA — the usual datasheet **limit** | 0.55 MΩ | 83.75 k | 12 538 | **−8.25 %** |
+
+At 1.65 V on a part rated for tens of volts the real leakage is usually nearer the top of that
+table than the bottom, so a bench check will probably look fine. Three things make that a bad
+bet for a deployment:
+
+1. **It is not specified where you are using it.** The datasheet number is at *rated* voltage;
+   nothing guarantees behaviour at 3 % of rated.
+2. **It roughly doubles every 10 °C.** A value verified on a 20 °C bench is ~4× at 40 °C inside
+   a sealed buoy — a scale error that *moves with temperature*, which is the worst possible
+   shape for a measurement.
+3. **The oxide deforms at low bias over time**, so leakage tends to grow over a deployment
+   rather than stay put.
+
+**And it would not be caught the way the settling error was.** Those two faults differ in a way
+that matters:
+
+| | what happens | does a meter on the pad reveal it? |
+|---|---|---|
+| ADC settling (Issue 72) | the pad is at the right voltage, the ADC misreads it | **yes** — meter and log disagree. This is how it was found |
+| capacitor leakage | the pad is genuinely pulled down | **no** — meter and log agree, both low |
+
+The only check that catches leakage is source voltage × divider ratio against the log. So if an
+electrolytic is used, verify against a **metered source**, not against the pad.
+
+Use a ceramic X7R/X5R. If only an electrolytic is to hand, it is fine for the bench check —
+just confirm the reading lands at 13 666 ± 30 for a metered 3.300 V, and replace it before the
+part goes in the water.
+
  Substituting it for the nominal 2.0 V in
 `counts × VREF / 16383` corrects the channel with **no other change** to the conversion chain,
 which is how `VertiSea.ino` applies it (Section 5).

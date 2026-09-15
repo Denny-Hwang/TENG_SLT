@@ -3074,6 +3074,15 @@ most of what would otherwise alias into a 1 Hz channel (Nyquist is 0.5 Hz; 0.1 �
 corner at 32 Hz). Do not go much beyond that — 10 µF puts the corner under Nyquist but takes
 2.5 s to settle, which smears the load-sag transient the channel exists to show.
 
-**Ceramic X7R/X5R, not electrolytic or tantalum.** Leakage into the pad is multiplied by the
-49.4 kΩ source impedance: 1 nA is 0.05 mV, but 1 µA is 49 mV — a 3 % scale error, i.e. the
-same class of bug this issue is about.
+**Ceramic X7R/X5R, not an aluminium electrolytic or tantalum.** Leakage is a load on a
+49.4 kΩ source: 1 nA costs 0.01 %, 500 nA costs 1.5 %, and the 3 µA that a 2.2 µF electrolytic
+datasheet typically *permits* costs **8.25 %**. At 1.65 V on a part rated for tens of volts the
+real figure is usually much better than the limit, so a bench check will probably pass — but
+electrolytic leakage roughly doubles every 10 °C and grows as the oxide deforms at low bias, so
+it becomes a scale error that **moves with temperature and age**.
+
+**It would also not be caught the way this issue was.** Settling leaves the pad at the correct
+voltage and the ADC misreading it, so a meter on the pad disagrees with the log — that is how
+this was found. Leakage genuinely pulls the pad down, so meter and log **agree**, both low.
+Only source voltage × divider ratio against the log catches it. See the tables in
+`docs/adc_calibration.md`.
