@@ -2872,7 +2872,7 @@ thing this system exists to measure.
 
 ---
 
-### Issue 70 — 🟠 High: the battery divider is not dividing — the pad sees the whole source
+### Issue 70 — ✅ RESOLVED: the source was being injected at the wrong node
 
 **Found:** 2026-09-15, the 18:03 capture, with grounding corrected and the current channel
 verified good.
@@ -2885,16 +2885,24 @@ verified good.
 | **observed** | **≥1.977 V** | **≥3.956 V** → **16 383, pinned** |
 | 3.300 V arriving at the pad undivided | 3.300 V | — → **pinned**, matches |
 
-The resistors measure 98.9 kΩ / 98.8 kΩ (Issue 68), so the divider *as a pair of components*
-is fine. What is not fine is that the pad sits at very nearly the full source voltage, which
-means the bottom leg is doing nothing: **an open R_bottom, or an open ground return on
-R_bottom, leaves the pad floating up to the source through R_top.** That is the usual outcome
-of reworking grounding, which is exactly what just happened.
+**Cause, confirmed by the operator 2026-09-15: the voltage was being applied at the wrong
+point** — the third row of that table, not the second. The divider was never in circuit. Fixed
+and re-measured.
+
+I led on the wrong branch: the resistors measure 98.9 kΩ / 98.8 kΩ (Issue 68) so I reasoned
+that the bottom leg must be doing nothing electrically, and proposed an open R_bottom or an
+open ground return as the likely cause — with "the source arriving at the pad undivided"
+listed only as a matching alternative. It was the alternative. Both produce an identical
+pinned reading, and the log cannot separate them; **where the source is landing is the
+cheaper thing to check, so it should be checked first.** The saturation warning now says so.
 
 The reading is a **floor, not a measurement** — the true voltage is anything at or above
 3.956 V — so no post-processing can recover it.
 
-**Check with the supply OFF, meter on resistance:**
+**Confirming the fix:** 3.300 V at the divider input must read **13 666 counts ≈ 3.30 V**.
+Anything still pinned at 16 383 means the source is *still* not going through the divider.
+
+**If it is still pinned, then check with the supply OFF, meter on resistance:**
 
 | from | to | expect |
 |---|---|---|
@@ -2910,17 +2918,17 @@ reference.
 
 ---
 
-### Issue 71 — 🟡 Medium: the current channel drifts ~24 % on a fixed bench input
+### Issue 71 — ⚪ CLOSED, not a fault: the drift was the operator adjusting the supply
 
-**Found:** 2026-09-15, same capture, noticed while confirming the current channel.
+**Raised and closed 2026-09-15.** With a nominally fixed 1.100 V applied, `A14` climbed
+9 040 → 11 200 counts (1.088 V → 1.348 V, **+23.9 %**) over about eight seconds, then settled
+back to ~9 740–9 814.
 
-With a fixed 1.100 V applied, `A14` reads 9 040 → 9 463 → 9 923 → 10 490 → **11 200** over
-about eight seconds, then settles back to ~9 740–9 814. That is **1.088 V → 1.348 V, +23.9 %**,
-well outside the ±0.1 % the same channel showed in its first seconds (9 130 counts = 1.099 V
-against 1.100 V applied).
+**The operator was turning the supply knob during the run.** Confirmed directly. The channel
+was tracking its input correctly the whole time — which is the same conclusion the first
+seconds already supported: 9 130 counts = 1.099 V against 1.100 V applied, an error of 0.1 %.
 
-Most likely the supply was being adjusted during the run — the excursion is smooth and
-one-directional, which is what a knob looks like and not what noise looks like. Worth one
-deliberate check before dismissing it, because a 24 % drift on a fixed input would invalidate
-every harvested-current number this system produces: apply 1.100 V, **touch nothing**, and
-watch the `A14=` line for 60 s. It should hold 9 137 ± 20.
+Raising it was still right. A 24 % excursion on what is described as a fixed input would
+invalidate every harvested-current number this system produces, and the log cannot tell a
+hand on a knob from a drifting channel. Closing it took one sentence from someone who was in
+the room; guessing which it was would have been worth nothing either way.

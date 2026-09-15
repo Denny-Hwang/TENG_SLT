@@ -5,6 +5,24 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-15 (closed) — Wrong injection point, and the drift was a knob
+
+Both remaining bench issues closed by the operator.
+
+**Issue 70:** the 3.3 V was being applied at the wrong node, so the divider was never in
+circuit and the pad saw the whole source — the third row of that issue's table, which I had
+listed as a matching alternative while leading on an open bottom leg. Both produce an
+identical pinned reading and the log cannot separate them, but *where the source is landing*
+is the cheaper check, so the saturation warning now says to check that first.
+
+**Issue 71:** the +23.9 % excursion on a "fixed" 1.100 V input was the supply knob being
+turned. The channel was tracking correctly throughout — consistent with the 0.1 % error it
+showed in its first seconds.
+
+Confirming the fix: 3.300 V at the divider input should read **13 666 counts ≈ 3.30 V**.
+
+---
+
 ## 2026-09-15 (resolved) — Grounding fixed the channel interaction; the divider is open
 
 Correcting the grounding resolved Issue 69, and the proof is clean: the battery channel sat
