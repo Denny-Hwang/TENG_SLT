@@ -1482,3 +1482,120 @@ Do not port the experimental DMA path into deployment firmware. Revisit SD DMA o
 different validated Apollo3 core/library or a proven SD driver that owns the complete IOM and SD
 token/response/busy state machine. Preallocation may be revisited independently after defining
 maximum deployment size, safe truncation, metadata recovery, and intentional power-loss tests.
+
+
+## U26 — ⭐⭐⭐ Firmware + parser: rotate the log into 30-minute files, one folder per day
+
+**Question asked 2026-09-18:** how long can the current code log continuously, is the result a
+sensible size to download and open on Windows, and if not, how should storage be reorganised?
+
+### 1. What a long run produces today — measured, not estimated
+
+From `09111727.BIN` (48.7 s, 293 251 B, hardware, core 1.2.1): **6 004 B/s**.
+
+| record | rate | B/s | share |
+|---|---|---|---|
+| `TYPE_IMU_RAW` (48 B) | ~98 Hz | 4 217 | **70 %** |
+| `TYPE_CURRENT_BLOCK` (100 × 2 B + 9) | ~8/s | 1 656 | 28 % |
+| RPM, health, BME280, battery, cal | ≤ 10 Hz | 130 | 2 % |
+
+| duration | `.BIN` | parser RAM (46×) | `_currentFast.csv` | `_imuRaw.csv` |
+|---|---|---|---|---|
+| 10 min | 3.6 MB | 0.17 GB | 13 MB | 3.6 MB |
+| 30 min | 10.8 MB | 0.5 GB | 39 MB | 11 MB |
+| 1 h | 22 MB | 1.0 GB | 79 MB | 21 MB |
+| 2 h | 43 MB | 2.0 GB | 158 MB | 43 MB |
+| **24 h** | **520 MB** | **24 GB** | **1.9 GB** | **513 MB** |
+| 48 h | 1.04 GB | 48 GB | 3.8 GB | 1.0 GB |
+
+**The card and the download are not the problem.** 520 MB/day on a 32 GB card is 60 days;
+FAT32's 4 GB per-file limit (which is also SD 1.3.0's 32-bit file-position limit) is ~7.5 days
+in one file; a 520 MB download over USB is a minute. Three things *are* the problem:
+
+1. **The parser holds 46× the file in RAM** (Issue 40) — 1 GB per hour. A one-day file cannot
+   be parsed on any laptop.
+2. **`_currentFast.csv` passes Excel's 1 048 576-row limit after 22 minutes** (795 rows/s).
+   `_imuRaw.csv` passes it after ~3 hours. A day's current CSV is 1.9 GB and 69 M rows.
+3. **One file is one failure domain.** A corrupted directory entry, an unflushed tail at power
+   loss, or a card fault mid-run takes the whole deployment with it. The recovery machine
+   (Issue 53/73) already splits on *failure*; nothing splits on *time*.
+
+### 2. Recommended: time-based rotation, 30 min, folder per day
+
+Open a new file every `SD_ROTATE_MINUTES` (default **30**), and put each day's files in a
+directory named `MMDD`. The 8.3 naming already encodes the minute, so no new scheme is needed:
+
+```
+/0915/09151143.BIN     ← rotated on the wall-clock half hour
+/0915/09151200.BIN
+/0915/09151230.BIN
+/0916/09160000.BIN
+```
+
+| rotation | file size | files/day | files/48 h | why |
+|---|---|---|---|---|
+| 10 min | 3.6 MB | 144 | 288 | fine-grained, but 288 entries to manage and 288 sets of boot records |
+| **30 min** | **10.8 MB** | **48** | **96** | 0.5 GB RAM to parse, 39 MB / 1.4 M-row current CSV — one file is still below every tooling limit except Excel's, and a day is one screen of files |
+| 60 min | 22 MB | 24 | 48 | 1 GB RAM per file to parse; already uncomfortable |
+
+**30 minutes is the largest unit a single file can still be opened at.** Beyond that the parser
+needs the streaming rewrite (Issue 40) *before* rotation helps, and below it the per-file
+overhead (boot records, directory entries, the 648 ms open) starts to show for no gain.
+
+**Why not per-type files or per-type subfolders.** Arduino SD 1.3.0 keeps one 512 B buffer
+per open `File`, and a write to a different file than the last one forces that file's sector
+out. The SD write is already the loop's longest pass at 11–48 ms per sector (Issue 34/59 data);
+splitting into five streams multiplies the number of partial-sector flushes, not just the
+bookkeeping, and directly costs IMU rate. The single interleaved stream with the RAM queue is
+*why* the pipeline keeps up. Split by time, never by type, on the device; split by type on the
+host, where the parser already does it for free.
+
+**What rotation costs on the device.** Opening the next file is `SD.open()` on a mounted card
+(milliseconds), not the 2 s `SD.begin()` of a remount, plus `sdWriteBootRecords()` (196 B and
+one flush). Do it in the flush slot so it lands where a stall is already tolerated, and never
+while a `TYPE_CURRENT_BLOCK` is half-built. The recovery machine (`sdTryRecover()`) already
+contains the open-next-file-and-write-boot-records sequence; rotation is that function minus
+the `SD.begin()` and minus the error.
+
+**Directories.** `SD.mkdir("0915")` exists in SD 1.3.0 and paths are just `"0915/09151143.BIN"`.
+The FAT root directory holds 512 entries on FAT16 and is unbounded on FAT32, so root-only would
+technically survive 10 days at 48 files/day — but a folder per day is what a person expects to
+see when they mount the card, and it keeps `dir` readable. Fall back to root if `mkdir` fails.
+
+**Prerequisite, already fixed:** Issue 76. Every file opened after boot needs a fresh RTC
+anchor, or its wall-clock is early by the uptime at rotation. `rtcLocalNow()` now provides it.
+
+### 3. Host side: treat a folder as one run
+
+`vertisea_protocol.py` already batch-parses `*.BIN`, and each rotated file is self-describing
+(its own cal and RTC records), so nothing breaks. What is needed for a day to be *usable*:
+
+1. **Parse a directory as one run**: `python vertisea_protocol.py 0915/` → per-file CSVs plus a
+   concatenated `0915_imuRaw.csv` etc., with the wall-clock column carried through so the seam
+   between files is invisible. Each file parses in 0.5 GB and is freed before the next.
+2. **A 1 Hz overview CSV per run** (`0915_overview.csv`: battery, BME280, health, RPM, and the
+   per-second current mean/peak from the blocks) — a day is 86 400 rows, which opens anywhere.
+   This is what you actually look at first; the 800 Hz current stays in per-file CSVs for the
+   events you then zoom into.
+3. **`current_filter_test.py` over a directory**: run the HiRes pipeline per file and emit one
+   charge total per file plus the run total. Charge is additive, so nothing is lost at seams.
+
+Issue 40's streaming parser remains the right long-term fix; with 30-minute files it stops
+being urgent, because no single file needs it.
+
+### 4. Not recommended
+
+- **Reducing the rate to make one file fit.** `IMU_RAW` is 70 % of the budget and 98 Hz is the
+  attitude measurement; the 800 Hz current is what resolves the discharge transient. Both are
+  the product. Rotate the container instead of thinning the contents.
+- **Compression on the device.** The Apollo3 has the cycles but the IMU data is high-entropy
+  sensor noise; a quick test on `09111727.BIN` with zlib would be worth one line before anyone
+  spends a week on it. (Predicted: < 25 % saving. Not worth a firmware dependency.)
+
+### 5. Effort
+
+Firmware: ~60 lines — a `sdRotateIfDue()` called from the flush slot, `mkdir`, and moving the
+filename builder out of `setup()` into a helper both can call. Parser: ~120 lines for directory
+mode and the overview CSV. One bench test: 90 minutes of logging with `SD_ROTATE_MINUTES 30`,
+confirm three files, matching cal records, continuous wall-clock across the seams, and
+`hall_rejected`/`sd_recoveries` unchanged. Then flip this entry to the Completion Log.

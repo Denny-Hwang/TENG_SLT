@@ -1459,9 +1459,43 @@ struct __attribute__((packed)) StatusPacket {
 // inversion (needs 0x10), and no wall-clock anchor (needs 0x05).
 //
 // Returns false if any append failed, which means sdError was re-set underneath us.
+// Read the RTC now and convert to local time, into the 6-byte TYPE_RTC_EVENT layout.
+// The parser maps every timestamp in a file as  wall = rtc_fields + (ts_ms - rtc_ts_ms),
+// so the pair it is given must be SIMULTANEOUS. Re-emitting the boot-time fields with a
+// later millis() - which is what the recovery path did until 2026-09-18 - makes every
+// wall-clock time in the new file early by the uptime at the moment it was opened
+// (Issue 76: LOG00014.BIN from the 18:18 run is ~10 min behind). Any file opened after
+// boot, whether by recovery or by rotation, must call this instead of reusing the boot
+// payload. Same day-carry logic as setup(); GPS_ENABLE boots set the RTC from GPS first,
+// so reading the RTC is correct in both configurations.
+static void rtcLocalNow(uint8_t out[6]) {
+  rtc.updateTime();
+  int     year  = (int)rtc.getYear();
+  int     month = rtc.getMonth();
+  int     day   = rtc.getDate();
+  int     hour  = (int)rtc.getHours() + timezoneOffsetHours;
+  uint8_t mn    = rtc.getMinutes();
+  uint8_t sec   = rtc.getSeconds();
+  static const uint8_t mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  auto daysIn = [&](int m, int y) -> int {
+    return (m == 2 && (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))) ? 29 : mdays[m - 1];
+  };
+  if (hour < 0) {
+    hour += 24; day -= 1;
+    if (day < 1) { month -= 1; if (month < 1) { month = 12; year -= 1; } day = daysIn(month, year); }
+  } else if (hour >= 24) {
+    hour -= 24; day += 1;
+    if (day > daysIn(month, year)) { day = 1; month += 1; if (month > 12) { month = 1; year += 1; } }
+  }
+  out[0] = (uint8_t)(year - 2000); out[1] = (uint8_t)month; out[2] = (uint8_t)day;
+  out[3] = (uint8_t)hour;          out[4] = mn;             out[5] = sec;
+}
+
 bool sdWriteBootRecords() {
   uint32_t t = millis();
 
+  // Fresh anchor, taken in the same instant as `t`. See rtcLocalNow().
+  rtcLocalNow(rtcBootPayload);
   sdAppendRecord(TYPE_RTC_EVENT, t, rtcBootPayload, sizeof(rtcBootPayload));
   sdAppendRecord(TYPE_FIXED_CAL, t, fixedCal);
   sdAppendRecord(TYPE_STAB_CAL,  t, stabCal);

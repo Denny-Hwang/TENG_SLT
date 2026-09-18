@@ -5,6 +5,26 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-18 — How long can it log? Measured, and a rotation design
+
+Asked: how big does a 1 h / 2 h / 1 day log get, does it open on Windows, and how should
+storage be reorganised if not. Measured on a hardware log: **6 004 B/s** — 22 MB/h, **520 MB
+per day**. The card and the download are fine; the tooling is not. The parser holds 46× the
+file in RAM (1 GB per hour, 24 GB per day) and `_currentFast.csv` passes Excel's row limit at
+22 minutes.
+
+Proposal, POTENTIAL_UPGRADES.md **U26**: rotate into **30-minute files** in a **folder per
+day** (`/0915/09151143.BIN`), 10.8 MB each, 48 per day — the largest unit a single file can
+still be parsed at. Split by time on the device, never by type: SD 1.3.0 flushes a sector every
+time the open file changes, and the SD write is already the loop's longest pass. Host side,
+parse a folder as one run and emit a 1 Hz overview CSV per day.
+
+Found and fixed on the way: every file the recovery path opened carried the *boot* RTC anchor
+with a *later* timestamp, so its wall-clock was early by the uptime at recovery. Rotation would
+have made that every file. Issue 76.
+
+---
+
 ## 2026-09-15 — 2.2 µF fitted: 16.9 % → 2.4 %, and the meter was measuring itself
 
 Source 3.290 V, meter on the pad 1.636 V. **The meter was reading its own loading**: 10 MΩ in

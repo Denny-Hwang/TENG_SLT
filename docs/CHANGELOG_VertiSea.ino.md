@@ -4,6 +4,19 @@ Newest first.
 
 ---
 
+## 2026-09-18 — Files opened after boot get a fresh RTC anchor — `[UNCONFIRMED]`
+
+`sdWriteBootRecords()` re-emitted the boot-time RTC fields with the current `millis()`, so any
+file the recovery path opened had every wall-clock time early by the uptime at which it was
+opened — about 10 minutes for `LOG00014.BIN` from the 2026-09-15 18:18 run. Counts and
+intervals were never affected; only `actual_time_local`. New `rtcLocalNow()` reads the RTC
+with the same timezone and day-carry conversion `setup()` uses, and the boot-record writer
+refreshes the payload from it in the same instant as the timestamp. This is the prerequisite
+for the 30-minute log rotation proposed in POTENTIAL_UPGRADES.md U26, where every file after
+the first is opened after boot. Issue 76.
+
+---
+
 ## 2026-09-15 — Show the discarded first battery conversion — `[UNCONFIRMED]`
 
 The battery channel reads 17.6 % low through its 49.4 kΩ divider (Issue 72): the pad meters

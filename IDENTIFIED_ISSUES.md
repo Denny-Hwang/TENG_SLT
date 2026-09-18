@@ -1753,6 +1753,12 @@ create tens of millions of dictionaries — far more memory than the raw BIN fil
 `load_bin_file()` also runs parsing and CSV writing synchronously on Tk's main thread, so the
 GUI cannot repaint or respond while conversion runs.
 
+**Measured 2026-09-18** on a real 48.7 s log (`09111727.BIN`, 293 251 B): the parsed
+structures hold **13.4 MB — 46× the file**. At the measured 6 004 B/s that is **1.0 GB of RAM
+per hour of log, 24 GB per day**. The parser stops being usable somewhere between two and
+three hours of recording on a 16 GB machine. Numbers and the file-rotation design that makes
+this moot are in POTENTIAL_UPGRADES.md U26.
+
 **Impact:** Short bench logs work, but deployment-scale logs can make the GUI appear hung,
 consume several GB of RAM, or fail before producing CSV output. This conflicts with U1's
 original large-file requirement.
@@ -3137,3 +3143,32 @@ and a 109 ms time constant — so it is not charge starvation any more. Candidat
 LiFePO4 plateau that spans 3.2–3.4 V, and the remaining work is bench metrology that does not
 block the harvested-current measurements this project is actually for. Revisit if the battery
 number is ever needed to better than a few percent.
+
+
+---
+
+### Issue 76 — 🟠 High: files opened after boot carried the boot-time RTC anchor with a later `ts_ms`
+
+**Found:** 2026-09-18, while designing log rotation (U26). Affects every file the recovery
+path has opened since Issue 53 — including `LOG00014.BIN` from the 2026-09-15 18:18 run.
+
+The parser maps wall-clock time as `rtc_fields + (ts_ms − rtc_ts_ms)`, so the RTC record's
+two halves must be **simultaneous**. `sdWriteBootRecords()` wrote `rtcBootPayload` — the
+fields captured in `setup()` — stamped with `t = millis()` at the moment of the call. In a
+file opened at uptime 648 s that says "at ts_ms = 648 000 the clock read 18:18:00", when
+18:18:00 was really ts_ms ≈ 0. **Every wall-clock time in that file is early by the uptime
+at which it was opened** — about 10 minutes for LOG00014.BIN. The counts, currents and
+intervals are all correct; only `actual_time_local` is shifted.
+
+Latent since Issue 53 because recovery was rare and never checked against the clock. It
+becomes a certainty under rotation, where every file after the first is "opened after boot".
+
+**Fix.** New `rtcLocalNow(uint8_t out[6])` reads the RTC and applies the same timezone and
+day-carry conversion `setup()` uses; `sdWriteBootRecords()` now refreshes `rtcBootPayload`
+from it in the same instant as `t` before emitting. `GPS_ENABLE` boots set the RTC from GPS
+first, so reading the RTC is correct in both configurations. Not compiled here; the
+declaration-order and preprocessor-nesting scans pass.
+
+**Already-captured recovered files** can be corrected offline: the first `ts_ms` in the file
+is approximately the uptime at which it was opened, so add that many milliseconds to every
+`actual_time_local` in that file's CSVs.
