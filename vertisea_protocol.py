@@ -586,8 +586,10 @@ def parse_binary_file(bin_path: str) -> dict:
                     found = _find_resync(buf, damage_at + 1, last_good_ts)
                     if found is None:
                         data['errors'].append(
-                            f"DAMAGE at offset {damage_at}: no further valid record found "
-                            f"in the remaining {file_size - damage_at} bytes; stopping.")
+                            f"DAMAGE at offset {damage_at}"
+                            + (f" (type byte 0x{pkt_type:02X})" if pkt_type is not None else "")
+                            + f": no further valid record found in the remaining "
+                            f"{file_size - damage_at} bytes; stopping.")
                         break
                     skipped = found - damage_at
                     resync_events += 1
