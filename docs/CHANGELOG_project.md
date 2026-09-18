@@ -5,6 +5,27 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-18 — Power loss: what survives, and two fixes
+
+Asked whether logging starts and stops on its own and whether a power cut can lose raw data.
+Starts on its own; **there is no stop.** An unplanned cut loses up to ~5.2 s (RAM queue plus
+the interval since the last 5 s `flush()`), and in the rare case that it lands inside the
+directory-entry write it can damage the open file itself. Issue 78, with the loss model
+layer by layer and the flush-interval trade-off stated.
+
+The parser was making it far worse: on one byte that was not a record type it **stopped**,
+so a single damaged sector in a day-long log discarded everything after it. It now
+resynchronises on a pair of agreeing headers and continues; a zeroed sector costs only the
+records it covers. Four tests. Issue 77.
+
+Firmware gains two opt-in clean-close paths — a stop jumper (blink 8) and a low-battery
+threshold (blink 9) — so a planned power-down costs nothing. Rotation (U26) is reframed as
+the strongest remaining protection: a directory hit then costs one 30-minute file, not the
+deployment. Next in value: a per-record CRC, which is the only way to detect damage inside a
+payload.
+
+---
+
 ## 2026-09-18 — How long can it log? Measured, and a rotation design
 
 Asked: how big does a 1 h / 2 h / 1 day log get, does it open on Windows, and how should

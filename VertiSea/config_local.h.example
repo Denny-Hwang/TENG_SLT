@@ -34,6 +34,12 @@
 // #define SD_BUFFERED_WRITE  1    // keep at 1
 // #define STAB_IMU_USES_MAG  0    // 1 enables 9-DOF fusion and the 0x07 record
 //
+// --- Clean-close protections (Issue 78) ----------------------------------------------
+//     Either turns a foreseeable power-down into a flushed, closed file. Blink code 8 / 9
+//     on the LED means "closed, safe to pull power".
+// #define SAFE_STOP_PIN         6      // free GPIO, jumper to GND to stop logging cleanly
+// #define BATTERY_SAFE_STOP_MV  2800   // close when logged A15 < this for 3 s (0 = off)
+//
 // --- Escape hatch ----------------------------------------------------------------------
 // Builds on Apollo3 core 2.x are refused (Issue 59). Do not define this unless hallISR()
 // has been rewritten to avoid micros(); see the core guard in VertiSea.ino.

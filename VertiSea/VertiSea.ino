@@ -347,6 +347,31 @@
 #define STAB_IMU_USES_MAG 0
 #endif
 
+// ---- Clean-close protections (opt-in; both inert unless set in config_local.h) -------
+//
+// The firmware has no way to know that power is about to go. What survives an unplanned
+// cut is everything up to the last flush() (FLUSH_INTERVAL_MS = 5 s) plus the data blocks
+// the SD library wrote since; what does not survive is the RAM queue (~1 kB), the partial
+// sector in the library cache, and - if the cut lands inside the directory-entry write of
+// a flush() - possibly the directory entry itself, which is the whole file. See
+// IDENTIFIED_ISSUES.md Issue 78. Both mechanisms below turn a foreseeable power-down into
+// a controlled close: flush, close the file, then halt on a distinct blink code so the
+// operator knows it is safe to pull power.
+//
+// SAFE_STOP_PIN: a GPIO with the internal pull-up, grounded by a jumper or switch to
+//   request a clean stop. Held LOW for ~250 ms -> close and halt with blink code 8.
+//   Undefined = compiled out. Pick a pin that is free on your wiring.
+//
+// BATTERY_SAFE_STOP_MV: when the LOGGED battery voltage (A15, so read the Issue 75 caveat:
+//   it reads a few percent low) stays below this for 3 consecutive seconds, close and
+//   halt with blink code 9. 0 = disabled. The right value depends on what powers the board
+//   and its regulator's dropout; a 1S LiFePO4 is empty at ~2500 mV, so something in the
+//   2700-2900 range is the usual choice. The card must still be within its own supply
+//   range when the close happens, which is the whole point of doing it early.
+#ifndef BATTERY_SAFE_STOP_MV
+#define BATTERY_SAFE_STOP_MV 0
+#endif
+
 // HALL_PIN: digital GPIO connected to the US1881 output (open-collector, active-LOW).
 // The pin must support attachInterrupt() on the Artemis Nano (any free digital GPIO).
 // Wire: sensor pin 3 → HALL_PIN with 4.7 kΩ pull-up to 3.3 V.
@@ -1207,6 +1232,21 @@ bool sdTryRecover() {
   return true;
 }
 
+// Flush everything and close the log so the directory entry, FAT chain and last partial
+// sector are all on the card. After this the file is exactly as complete as it will ever
+// be, and pulling power costs nothing. Sets sdError so no later path touches logFile, and
+// exhausts the recovery attempts so the remount machine stays quiet.
+static void sdCloseCleanly(const char* why) {
+  (void)why;
+  if (!sdError) {
+    sdFlushBuffered();          // RAM queue + producer sector -> library cache -> card
+    if (logFile) logFile.close();   // sync(): directory entry + FAT, then release
+    DBG_PRINT("Log closed cleanly ("); DBG_PRINT(why); DBG_PRINTLN("). Safe to power off.");
+  }
+  sdError = true;
+  sdRecoveryAttempts = SD_MAX_RECOVERY_ATTEMPTS;
+}
+
 // TYPE_TELEM_IMU (0x06) — 5 Hz IMU attitude + vertical displacement
 // Total: 1B type + 2B ts10 + 5×int16 = 13 bytes
 // Angle encoding: centidegrees (×100).  int16_t range → ±327.67°.  Resolution: 0.01°.
@@ -1784,6 +1824,8 @@ void hallISR() {
 //
 //   1 = RTC        2 = BME280      3 = stabilized IMU   4 = fixed IMU
 //   5 = (retired)  6 = (retired)   7 = (retired)
+//   8 = log closed cleanly by the SAFE_STOP_PIN jumper   - safe to power off
+//   9 = log closed cleanly on low battery (BATTERY_SAFE_STOP_MV) - safe to power off
 //
 // Codes 5-7 were the SD card faults. Since 2026-09-12 an SD fault no longer halts: the
 // firmware runs without logging, blinks the 4 Hz "SD degraded" pattern instead, and
@@ -1889,6 +1931,9 @@ void setup() {
   analogReadResolution(14);     // 14-bit ADC → 0–16383 counts
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);  // LED on solid during setup; goes low when done
+#ifdef SAFE_STOP_PIN
+  pinMode(SAFE_STOP_PIN, INPUT_PULLUP);   // ground it to request a clean stop
+#endif
 
   // Serial1: RFD900 radio modem at 115200 baud (telemetry output only).
   // NOTE: An Emlid M2 external GNSS was originally planned for this port
@@ -2530,6 +2575,21 @@ void loop() {
       battery_mV
     };
     TELEM_WRITE(batteryPkt);
+
+#if BATTERY_SAFE_STOP_MV > 0
+    // Three consecutive seconds below threshold: close while the card can still write.
+    // One low reading is not enough - the channel carries ~0.8 % scatter (Issue 75) and
+    // a load transient can dip a healthy cell for a moment.
+    static uint8_t lowBatterySeconds = 0;
+    if (!sdError && battery_mV > 0 && battery_mV < BATTERY_SAFE_STOP_MV) {
+      if (++lowBatterySeconds >= 3) {
+        sdCloseCleanly("battery low");
+        haltWithBlinkCode(9);
+      }
+    } else {
+      lowBatterySeconds = 0;
+    }
+#endif
   }
 
   // ---- 1 Hz BME280 environmental log --------------------------------------
@@ -3076,6 +3136,24 @@ void loop() {
     };
     TELEM_WRITE(statusPkt);
   }
+
+#ifdef SAFE_STOP_PIN
+  // ---- Clean-stop jumper ---------------------------------------------------
+  // Debounced across loop passes rather than with delay(): ~100 consecutive LOW reads
+  // at the ~370 Hz loop is about 270 ms, long enough to ignore a brushed contact.
+  {
+    static uint8_t safeStopLowPasses = 0;
+    if (digitalRead(SAFE_STOP_PIN) == LOW) {
+      if (safeStopLowPasses < 255) safeStopLowPasses++;
+      if (safeStopLowPasses >= 100) {
+        sdCloseCleanly("stop jumper");
+        haltWithBlinkCode(8);
+      }
+    } else {
+      safeStopLowPasses = 0;
+    }
+  }
+#endif
 
   // ---- LED heartbeat -------------------------------------------------------
   // Normal operation  : slow 1 Hz toggle (500 ms on / 500 ms off).

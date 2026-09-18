@@ -512,6 +512,69 @@ class TestDerivedConversions(unittest.TestCase):
         data = parse_bytes(blob)
         self.assertFalse([n for n in data['notes'] if 'ADC channel interaction' in n])
 
+    # ---- damage tolerance ---------------------------------------------------------
+    # The SD format has no sync marker and no CRC. Before 2026-09-18 one bad byte in a
+    # type field stopped the parse, so a single damaged sector in a 520 MB day-long log
+    # discarded everything after it. These pin the recovery behaviour.
+
+    def _stream(self, seconds=30):
+        """A plausible 30 s log: 1 Hz health + battery, ~8 current blocks/s."""
+        blob = current_cal(0, vref=1.97225, adc_max=16383.0, div_ratio=1.0, sens=100.0)
+        blob += battery_cal(0, 1.97710, 16383.0, 98900.0, 98800.0, 2.00101)
+        for s in range(seconds):
+            t = 1000 * s
+            blob += sys_health(t, loop_max_us=3000 + s)
+            blob += record(vs.TYPE_BATTERY_VOLTAGE, t + 500, struct.pack('<H', 13600))
+            for k in range(8):
+                blob += current_block(t + 125 * k, 124, tuple([9000 + k] * 100))
+        return blob
+
+    def test_intact_stream_never_resyncs(self):
+        data = parse_bytes(self._stream())
+        self.assertEqual(structural_errors(data), [])
+        self.assertFalse([e for e in data['errors'] if 'DAMAGE' in e])
+        self.assertEqual(len(data['sys_health']), 30)
+        self.assertEqual(len(data['current_fast']), 30 * 8 * 100)
+
+    def test_one_bad_type_byte_loses_one_record_not_the_file(self):
+        blob = bytearray(self._stream())
+        # Find the health record at t = 15 s and smash its type byte.
+        target = sys_health(15000, loop_max_us=3015)
+        at = bytes(blob).index(target)
+        blob[at] = 0xEE                                   # not a record type
+        data = parse_bytes(bytes(blob))
+        dmg = [e for e in data['errors'] if 'DAMAGE' in e]
+        self.assertEqual(len(dmg), 1)
+        self.assertIn(f"offset {at}", dmg[0])
+        # Everything after the damage is still there.
+        self.assertEqual(len(data['sys_health']), 29)
+        self.assertEqual(len(data['current_fast']), 30 * 8 * 100)
+        self.assertEqual(data['sys_health'][-1]['ts_ms'], 29000)
+
+    def test_a_zeroed_sector_costs_only_the_records_it_covers(self):
+        blob = bytearray(self._stream())
+        start = 20 * 1024                                 # somewhere in the middle
+        blob[start:start + 512] = b'\x00' * 512          # a dead SD sector
+        data = parse_bytes(bytes(blob))
+        dmg = [e for e in data['errors'] if 'DAMAGE' in e]
+        self.assertTrue(dmg, "damage was not reported")
+        # 30 s of data; the sector is ~85 ms of it. Nearly all must survive.
+        self.assertGreaterEqual(len(data['current_fast']), 30 * 8 * 100 - 3 * 100)
+        self.assertGreaterEqual(len(data['sys_health']), 29)
+        self.assertEqual(data['sys_health'][-1]['ts_ms'], 29000)
+        self.assertTrue(any('Resynchronised' in n for n in data['notes']))
+
+    def test_impossible_block_count_is_treated_as_damage(self):
+        blob = bytearray(self._stream())
+        target = current_block(15000, 124, tuple([9000] * 100))
+        at = bytes(blob).index(target)
+        struct.pack_into('<H', blob, at + 7, 60000)       # 60 000 samples: impossible
+        data = parse_bytes(bytes(blob))
+        self.assertTrue(any('claims 60000 samples' in e for e in data['errors']))
+        self.assertTrue(any('DAMAGE' in e for e in data['errors']))
+        self.assertEqual(data['sys_health'][-1]['ts_ms'], 29000)
+        self.assertGreaterEqual(len(data['current_fast']), 30 * 8 * 100 - 100)
+
     def test_zero_adc_max_is_reported_not_crashed(self):
         blob = (current_block(0, 9, tuple([1] * 10))
                 + current_cal(1, vref=2.0, adc_max=0.0, div_ratio=1.0, sens=100.0))
@@ -536,11 +599,19 @@ class TestMalformedInput(unittest.TestCase):
         self.assertEqual(len(data['rpm']), 1)
         self.assertEqual(data['errors'], [])
 
-    def test_unknown_type_stops_with_a_diagnostic(self):
+    def test_unknown_type_with_nothing_valid_after_it_reports_damage(self):
+        """Behaviour changed 2026-09-18: an unknown type byte is DAMAGE, not a stop code.
+
+        With nothing parseable after it the parse still ends here, but it says why and
+        where. What came before is kept either way.
+        """
         data = parse_bytes(record(vs.TYPE_RPM, 1, struct.pack('<H', 5))
                            + record(0x7F, 2, b'\x00' * 4))
         self.assertEqual(len(data['rpm']), 1)
-        self.assertTrue(any('Unknown packet type 0x7F' in e for e in data['errors']))
+        dmg = [e for e in data['errors'] if 'DAMAGE' in e]
+        self.assertEqual(len(dmg), 1)
+        self.assertIn('0x7F', dmg[0])
+        self.assertIn('stopping', dmg[0])
 
     def test_empty_file(self):
         data = parse_bytes(b'')

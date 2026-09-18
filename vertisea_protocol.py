@@ -23,6 +23,7 @@ Can also be run directly to convert logs without opening the GUI:
 """
 
 import bisect
+import io
 import csv
 import os
 import struct
@@ -218,8 +219,17 @@ def parse_binary_file(bin_path: str) -> dict:
                    'accel_scale_x', 'accel_scale_y', 'accel_scale_z',
                    'gyro_bias_x', 'gyro_bias_y', 'gyro_bias_z')
 
-    with open(bin_path, 'rb') as fid:
-        file_size = os.path.getsize(bin_path)
+    # The file is read into memory once. A rotated file (U26) is ~11 MB; even an unrotated
+    # day is 520 MB, well inside what the per-record dicts below already cost (Issue 40),
+    # and resynchronisation needs random access to look past a damaged region.
+    with open(bin_path, 'rb') as _f:
+        buf = _f.read()
+    file_size = len(buf)
+    last_good_ts = 0          # timestamp of the last record parsed cleanly
+    resync_events = 0
+
+    if True:
+        fid = io.BytesIO(buf)
         byte_offset = 0
 
         while byte_offset < file_size:
@@ -380,14 +390,26 @@ def parse_binary_file(bin_path: str) -> dict:
                         f"Truncated CURRENT_BLOCK header at offset {byte_offset}")
                     break
                 span_ms, n = struct.unpack('<HH', hdr)
-                raw = fid.read(2 * n)
+                if n == 0 or n > MAX_CURRENT_BLOCK_SAMPLES:
+                    # The firmware writes 1..100 samples per block. Anything else is a
+                    # damaged count field, and honouring it would skip real data.
+                    data['errors'].append(
+                        f"CURRENT_BLOCK at offset {byte_offset - 9} claims {n} samples "
+                        f"(firmware max {MAX_CURRENT_BLOCK_SAMPLES}); treating as damage.")
+                    pkt_type = None       # fall into the resync path below
+                    fid.seek(byte_offset - 9 + 1)
+                    byte_offset = byte_offset - 9 + 1
+                    raw = b''
+                    n = 0
+                else:
+                    raw = fid.read(2 * n)
                 byte_offset += len(raw)
                 if len(raw) < 2 * n:
                     data['errors'].append(
                         f"Truncated CURRENT_BLOCK payload at offset {byte_offset} "
                         f"(wanted {2 * n} bytes, got {len(raw)})")
                     break
-                samples = struct.unpack(f'<{n}H', raw)
+                samples = struct.unpack(f'<{n}H', raw) if n else ()
                 # Spread samples evenly across the measured span. With n samples
                 # the span covers n-1 intervals.
                 dt_ms = (span_ms / (n - 1)) if n > 1 else 0.0
@@ -434,7 +456,17 @@ def parse_binary_file(bin_path: str) -> dict:
                         f"Truncated HALL_EDGE count at offset {byte_offset}")
                     break
                 n = cnt_raw[0]
-                raw = fid.read(4 * n)
+                if n == 0 or n > MAX_HALL_EDGES_PER_RECORD:
+                    data['errors'].append(
+                        f"HALL_EDGE at offset {byte_offset - 6} claims {n} edges "
+                        f"(firmware max {MAX_HALL_EDGES_PER_RECORD}); treating as damage.")
+                    pkt_type = None
+                    fid.seek(byte_offset - 6 + 1)
+                    byte_offset = byte_offset - 6 + 1
+                    raw = b''
+                    n = 0
+                else:
+                    raw = fid.read(4 * n)
                 byte_offset += len(raw)
                 if len(raw) < 4 * n:
                     data['errors'].append(
@@ -547,10 +579,36 @@ def parse_binary_file(bin_path: str) -> dict:
                         f"Skipped known-type packet 0x{pkt_type:02X} "
                         f"(no handler) at offset {byte_offset}")
                 else:
+                    # A byte that is not a record type. Before 2026-09-18 this stopped
+                    # the parse, which on a long log discards everything after one bad
+                    # sector. Scan forward for the next pair of agreeing headers instead.
+                    damage_at = byte_offset - 5 if pkt_type is not None else byte_offset
+                    found = _find_resync(buf, damage_at + 1, last_good_ts)
+                    if found is None:
+                        data['errors'].append(
+                            f"DAMAGE at offset {damage_at}: no further valid record found "
+                            f"in the remaining {file_size - damage_at} bytes; stopping.")
+                        break
+                    skipped = found - damage_at
+                    resync_events += 1
                     data['errors'].append(
-                        f"Unknown packet type 0x{pkt_type:02X} at byte offset "
-                        f"{byte_offset} — cannot determine payload size; stopping.")
-                    break
+                        f"DAMAGE at offset {damage_at}"
+                        + (f" (type byte 0x{pkt_type:02X})" if pkt_type is not None else "")
+                        + f": skipped {skipped} bytes to the next valid record at offset "
+                        f"{found}. About {skipped / 6.0:.0f} ms of data lost there.")
+                    fid.seek(found)
+                    byte_offset = found
+                    continue
+
+            last_good_ts = ts_ms if ts_ms >= last_good_ts else last_good_ts
+
+    if resync_events:
+        data['notes'].append(
+            f"Resynchronised {resync_events} time(s) after damaged bytes. Every record "
+            "before and after each damaged region was recovered; only the records "
+            "overlapping the damage are lost. The SD format carries no CRC, so a damaged "
+            "byte INSIDE a record's payload cannot be detected and reads as a wrong "
+            "value - check the affected timestamps against neighbours if it matters.")
 
     # ---- Derive milliamps from raw counts using the cal record ------------------
     # Done after the main pass so the cal packet's position in the file does not
@@ -880,6 +938,85 @@ _CSV_CAL_FIELDS = ('ts_ms', 'accel_bias_x', 'accel_bias_y', 'accel_bias_z',
 
 # Module-level so the CSV writer and the GUI's parse summary share ONE ordered source of
 # truth. The summary used to iterate a parallel hard-coded key list that omitted
+# Upper bounds the firmware can actually produce for the two variable-length records:
+# CURRENT_BLOCK_LEN = 100 samples, HALL_EDGE_BUF_LEN = 32 slots (31 usable). A count above
+# these did not come from the firmware; it came from a damaged byte, and trusting it would
+# skip kilobytes of good data or run off the end of the file.
+MAX_CURRENT_BLOCK_SAMPLES = 100
+MAX_HALL_EDGES_PER_RECORD = 31
+
+# How far ahead of the last good record a candidate header's timestamp may sit and still
+# be believed during resynchronisation. ts_ms is millis() since boot and strictly
+# increases within a file, so a header claiming to be more than this far in the future,
+# or in the past, is garbage that happened to look like a header.
+RESYNC_MAX_GAP_MS = 10 * 60 * 1000
+
+# Records are NOT globally monotonic: a TYPE_CURRENT_BLOCK is stamped with its first
+# sample's time but written up to ~125 ms later, after 1 Hz records stamped in between,
+# and a recovery pass has held a block for 648 ms. So a valid header may sit a little
+# BEFORE the last good timestamp. Allow that much; a candidate further back is garbage.
+RESYNC_BACKWARD_MS = 5000
+
+
+def _payload_len_at(buf, pos):
+    """Payload length of the record whose 5-byte header starts at buf[pos], or None.
+
+    None means "this cannot be a record header": unknown type, or a variable-length count
+    the firmware could never have written. Reads only what it needs; never raises.
+    """
+    if pos + 5 > len(buf):
+        return None
+    t = buf[pos]
+    if t == TYPE_CURRENT_BLOCK:
+        if pos + 9 > len(buf):
+            return None
+        n = struct.unpack_from('<H', buf, pos + 7)[0]
+        return 4 + 2 * n if 0 < n <= MAX_CURRENT_BLOCK_SAMPLES else None
+    if t == TYPE_HALL_EDGE:
+        if pos + 6 > len(buf):
+            return None
+        n = buf[pos + 5]
+        return 1 + 4 * n if 0 < n <= MAX_HALL_EDGES_PER_RECORD else None
+    return _SD_PAYLOAD_BYTES.get(t)
+
+
+def _find_resync(buf, start, last_ts):
+    """Byte offset of the next believable record header at or after `start`, or None.
+
+    A header is believed only when BOTH it and the header that follows its payload are
+    plausible: known type, and a timestamp that is not before the last good record and
+    not more than RESYNC_MAX_GAP_MS after it. Two agreeing headers make an accidental
+    match in sensor noise vanishingly unlikely (the type byte alone matches 1 in ~12).
+
+    This is what turns a single damaged byte from "the rest of the file is lost" into
+    "one record is lost". The SD format has no sync marker and no CRC, so without this
+    the parser's only option on a bad type byte was to stop - and on a 520 MB day-long
+    log, stopping at byte 1 000 000 discards 99.8 % of the data that is physically there.
+    """
+    n = len(buf)
+    lo = last_ts - RESYNC_BACKWARD_MS if last_ts > RESYNC_BACKWARD_MS else 0
+    hi = last_ts + RESYNC_MAX_GAP_MS
+    pos = start
+    while pos + 5 <= n:
+        plen = _payload_len_at(buf, pos)
+        if plen is not None:
+            ts = struct.unpack_from('<I', buf, pos + 1)[0]
+            if lo <= ts <= hi:
+                nxt = pos + 5 + plen
+                if nxt > n:
+                    pos += 1              # would run past EOF: not a record, keep scanning
+                    continue
+                if nxt == n:
+                    return pos            # exactly the last record in the file
+                plen2 = _payload_len_at(buf, nxt)
+                if plen2 is not None:
+                    ts2 = struct.unpack_from('<I', buf, nxt + 1)[0]
+                    if ts - RESYNC_BACKWARD_MS <= ts2 <= ts + RESYNC_MAX_GAP_MS:
+                        return pos
+        pos += 1
+    return None
+
+
 # 'imu_raw', 'rtc_event', 'fixed_cal' and 'stab_cal' — so a log from the committed
 # IMU_RAW_ONLY=1 build reported zero IMU records even though _imuRaw.csv was written
 # correctly. Adding a packet type must not require remembering a second list. (Issue 51)

@@ -4,6 +4,19 @@ Newest first.
 
 ---
 
+## 2026-09-18 — Opt-in clean-close: stop jumper and low-battery threshold — `[UNCONFIRMED]`
+
+There is no clean shutdown; every power cut is unplanned and costs up to ~5 s plus a small
+chance of the open file's directory entry (Issue 78). Two opt-in mechanisms, both inert unless
+set in `config_local.h`, turn a foreseeable power-down into a flushed, closed file:
+`SAFE_STOP_PIN` (GPIO with pull-up, grounded ~250 ms → `sdCloseCleanly()`, blink code 8) and
+`BATTERY_SAFE_STOP_MV` (logged A15 below the value for 3 consecutive seconds → close, blink
+code 9). `sdCloseCleanly()` drains the RAM queue through `sdFlushBuffered()` and then
+`logFile.close()`, which syncs the last block, the directory entry and the FAT. Not compiled
+here; declaration order and preprocessor nesting checked.
+
+---
+
 ## 2026-09-18 — Files opened after boot get a fresh RTC anchor — `[UNCONFIRMED]`
 
 `sdWriteBootRecords()` re-emitted the boot-time RTC fields with the current `millis()`, so any

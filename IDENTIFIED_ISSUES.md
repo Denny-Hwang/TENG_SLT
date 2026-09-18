@@ -3172,3 +3172,96 @@ declaration-order and preprocessor-nesting scans pass.
 **Already-captured recovered files** can be corrected offline: the first `ts_ms` in the file
 is approximately the uptime at which it was opened, so add that many milliseconds to every
 `actual_time_local` in that file's CSVs.
+
+
+---
+
+### Issue 77 — 🔴 Critical: one damaged byte discarded the rest of the log — FIXED in the parser
+
+**Found:** 2026-09-18, reviewing what a power cut does to recorded data.
+
+The SD format is a plain stream of `type, ts_ms, payload` with **no sync marker and no CRC**.
+On a byte that is not a record type, `parse_binary_file()` appended "cannot determine
+payload size; stopping" and **broke out of the loop**. One bad sector at byte 1 000 000 of a
+520 MB day-long log therefore discarded 99.8 % of the data that was physically on the card.
+A damaged count field in a `CURRENT_BLOCK` (up to 65 535 samples) or `HALL_EDGE` (up to 255
+edges) was honoured as written, skipping kilobytes of good records or running off the end.
+
+**Fix.** The parser now resynchronises. On an unrecognised type byte, or a variable-length
+count the firmware could never have written (> 100 samples, > 31 edges), it scans forward for
+the next **pair of agreeing headers** — a known type with a timestamp inside
+[last good − 5 s, last good + 10 min], followed after its payload by another such header
+that fits inside the file. Two headers agreeing makes an accidental match in sensor noise
+negligible (the type byte alone matches 1 in ~12). The gap is reported with its offset and an
+estimate of the milliseconds lost; parsing continues.
+
+Verified: an intact hardware log resyncs zero times; a smashed type byte loses exactly one
+record; a zeroed 512-byte sector loses only the records it covers; a 60 000-sample count is
+treated as damage. Four tests.
+
+**What it cannot do.** A damaged byte *inside* a payload is undetectable — it reads as a wrong
+value. Only a per-record CRC fixes that, and that is a protocol change touching the firmware,
+both parsers and the tests. Recorded as the next step under Issue 78, not done here.
+
+---
+
+### Issue 78 — 🟠 High: there is no clean shutdown — what a power cut actually loses
+
+**Asked 2026-09-18:** does logging start on power-up, finish cleanly on power-down, and can raw
+data be lost? Data integrity is the first priority.
+
+**Start: yes.** `setup()` opens the file, writes the calibration and RTC records, flushes them,
+and `loop()` logs from then on. No operator action.
+
+**Stop: there is none.** The firmware cannot know that power is about to go, so every power
+cut is unplanned. What is in flight at that instant, from the top of the pipe down:
+
+| layer | size | at a power cut |
+|---|---|---|
+| producer sector (`sdProducer`) | ≤ 512 B | **lost** (RAM) |
+| RAM queue (`sdQueue`) | ≤ 4 kB, ~1 kB typical | **lost** (RAM) |
+| SD library cache — last partial 512 B block | ≤ 512 B | **lost** |
+| full data blocks written since the last `flush()` | ≤ 5 s ≈ 30 kB | **on the card**, but the directory entry still says the file ends at the last flush — the tail is physically present and unreachable to a normal file read |
+| everything up to the last `flush()` | — | **safe** |
+
+`FLUSH_INTERVAL_MS = 5 s`, and `File::flush()` in SD 1.3.0 is a `sync()`: it writes the cached
+block and updates the directory entry (file size) and FAT. So the honest statement is
+**"an unplanned cut loses up to ~5.2 s of data, normally."**
+
+**The abnormal case is the one that matters.** If the cut lands inside the directory-sector
+write of a `sync()` — a few milliseconds every 5 s, ~0.1 % of the time — the entry for the
+file can be left inconsistent, and depending on the card, the file can be lost entirely, not
+just its tail. Cheap cards also corrupt the sector *being written* on any mid-write cut, and
+some corrupt neighbours. Two FAT copies protect the FAT; nothing protects the directory
+sector. Until Issue 77 this was compounded by the parser: a single damaged sector anywhere
+lost everything after it.
+
+**Trade-off in the flush interval, stated so nobody moves it blindly.** Flushing every 1 s
+cuts the normal loss window 5× but makes the vulnerable directory write 5× as frequent, so the
+whole-file risk per cut rises the same 5×. Both numbers are small; they pull in opposite
+directions, and 5 s is a reasonable point. Rotating the file (U26) is what actually shrinks
+the whole-file case — a directory hit can then only take the current 30-minute file.
+
+**Protections added (opt-in, inert by default), `config_local.h`:**
+
+| flag | behaviour | LED |
+|---|---|---|
+| `SAFE_STOP_PIN n` | GPIO with pull-up; ground for ~250 ms → flush, close, halt | **8 pulses** = closed, safe to power off |
+| `BATTERY_SAFE_STOP_MV v` | logged A15 < v for 3 consecutive s → flush, close, halt | **9 pulses** = closed on low battery |
+
+Both call `sdCloseCleanly()`: `sdFlushBuffered()` empties the RAM queue and producer sector into
+the library, `logFile.close()` syncs the last block, directory entry and FAT. After the blink
+code the file is as complete as it will ever be. **The jumper is the operational answer**: a
+planned power-down costs zero data instead of five seconds and a dice roll. The battery
+threshold covers the unplanned one, provided the board's own supply is the cell being
+measured — set it above the regulator's dropout and the card's minimum (a 1S LiFePO4 is empty
+at ~2.5 V; 2.7–2.9 V is the usual band), and remember A15 reads a few percent low (Issue 75).
+Neither is compiled here.
+
+**Not done, in order of value:**
+1. **Per-record CRC** in the SD format — the only thing that detects damage *inside* a payload.
+   Protocol change; touches firmware, both parsers, tests.
+2. **Pre-allocated contiguous files** so the FAT is never written during a run — needs SdFat,
+   not SD 1.3.0.
+3. **A supercapacitor hold-up** with a power-fail interrupt — the hardware answer that makes
+   every cut a clean close.

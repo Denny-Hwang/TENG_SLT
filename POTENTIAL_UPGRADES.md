@@ -1562,6 +1562,11 @@ The FAT root directory holds 512 entries on FAT16 and is unbounded on FAT32, so 
 technically survive 10 days at 48 files/day — but a folder per day is what a person expects to
 see when they mount the card, and it keeps `dir` readable. Fall back to root if `mkdir` fails.
 
+**Rotation is also the strongest data-safety measure available without new hardware.** A
+power cut can, rarely, damage the directory entry of the *open* file (Issue 78). With one
+file per run that is the whole deployment; with 30-minute files it is at most the last
+30 minutes, and every earlier file was closed by a full `sync()`.
+
 **Prerequisite, already fixed:** Issue 76. Every file opened after boot needs a fresh RTC
 anchor, or its wall-clock is early by the uptime at rotation. `rtcLocalNow()` now provides it.
 
