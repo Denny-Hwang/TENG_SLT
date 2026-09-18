@@ -318,7 +318,10 @@ millimetres. It is **not** logged to SD separately (it can be reconstructed offl
    not make SPI asynchronous. Direct Apollo3 IOM DMA is rejected on core 1.2.1 after all tested
    CMD25 architectures failed response synchronization or byte verification.
 
-Log filename format: `MMDDHHmm.BIN` (e.g., `04030825.BIN` = April 3, 08:25 **local time**).
+Log path format: `MMDD/MMDDHHmm.BIN` — a folder per day, a file per rotation interval
+(e.g., `0403/04030825.BIN` = April 3, file opened 08:25 **local time**). The file is closed
+and the next one opened every `SD_ROTATE_MINUTES` (default 5) of uptime; each file carries
+its own calibration and RTC records so it parses on its own.
 Filename is generated from local time (UTC + `timezoneOffsetHours`) at the end of `setup()`.
 The `TYPE_RTC_EVENT` boot record also uses local time. The RTC hardware register stores UTC.
 

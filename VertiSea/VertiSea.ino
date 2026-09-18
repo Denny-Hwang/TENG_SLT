@@ -372,6 +372,19 @@
 #define BATTERY_SAFE_STOP_MV 0
 #endif
 
+// SD_ROTATE_MINUTES: close the log and open a new file every N minutes of UPTIME, in a
+//   folder per day (MMDD/). This is the strongest data-safety measure available without
+//   new hardware (Issue 78): a power cut can, rarely, damage the directory entry of the
+//   OPEN file, and with rotation that is at most the last N minutes - every earlier file
+//   was closed by a full sync(). It also keeps each file small enough to parse (Issue 40)
+//   and each _currentFast.csv under Excel's row limit. Measured at 6 kB/s a 5-minute
+//   file is ~1.8 MB, 288 files a day. Counted from boot, not the wall clock, so the
+//   first file is a full interval and a reboot is always a fresh start. 0 = one file per
+//   boot, the pre-2026-09-18 behaviour.
+#ifndef SD_ROTATE_MINUTES
+#define SD_ROTATE_MINUTES 5
+#endif
+
 // HALL_PIN: digital GPIO connected to the US1881 output (open-collector, active-LOW).
 // The pin must support attachInterrupt() on the Artemis Nano (any free digital GPIO).
 // Wire: sensor pin 3 → HALL_PIN with 4.7 kΩ pull-up to 3.3 V.
@@ -907,7 +920,9 @@ uint32_t sdWriteFailures   = 0;   // cumulative failed writes since boot (health
 uint32_t sdRecoveries      = 0;   // successful remounts since boot (health record)
 uint8_t  sdRecoveryAttempts = 0;  // consecutive failed remounts; reset on success
 uint32_t lastSdRecoveryMs  = 0;   // millis() of the last remount attempt
-char     sdLogName[20]     = {0}; // current log filename, for the recovery path
+char     sdLogName[20]     = {0}; // current log path ("MMDD/MMDDHHMM.BIN"), for recovery/rotation
+uint32_t sdFileOpenedMs    = 0;   // millis() when the current log file was opened (rotation clock)
+uint32_t sdRotations       = 0;   // files opened by rotation since boot
 
 // RTC boot timestamp payload (TYPE_RTC_EVENT), captured in setup() and re-emitted into
 // any replacement file opened by the recovery path.
@@ -1176,6 +1191,13 @@ bool sdAppendRecord(uint8_t type, uint32_t t_ms, const T& payload) {
 // Forward declaration: defined below, after the calibration structs it serialises.
 // Needed here because sdTryRecover() re-emits the boot records into the new file.
 bool sdWriteBootRecords();
+// The three helpers below are defined after their first users (sdTryRecover() and
+// sdRotateIfDue()). Explicit prototypes rather than trusting the Arduino prototype
+// generator with `static` functions - the build broke once already on ordering (Issue 64
+// changelog), and a prototype costs nothing.
+static void rtcLocalNow(uint8_t out[6]);
+static bool sdDayFolder(const uint8_t local[6], char out[6]);
+static bool sdFindCounterName(const char* dir, char* out, size_t outLen);
 
 bool sdTryRecover() {
   if (sdRecoveryAttempts >= SD_MAX_RECOVERY_ATTEMPTS) return false;
@@ -1199,12 +1221,7 @@ bool sdTryRecover() {
   // straight to the counter namespace and take the first free slot — the same
   // no-overwrite rule setup() uses.
   char fname[20] = {0};
-  bool found = false;
-  for (uint32_t n = 1; n <= 99999UL; n++) {
-    snprintf(fname, sizeof(fname), "LOG%05lu.BIN", n);
-    if (!SD.exists(fname)) { found = true; break; }
-  }
-  if (!found) {
+  if (!sdFindCounterName("", fname, sizeof(fname))) {
     DBG_PRINTLN("SD recovery: no unused filename remains.");
     return false;
   }
@@ -1216,6 +1233,7 @@ bool sdTryRecover() {
   }
 
   snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
+  sdFileOpenedMs = millis();
   sdError = false;              // clear BEFORE writing: sdAppendRecord() checks it
   sdRecoveryAttempts = 0;
   sdRecoveries++;
@@ -1245,6 +1263,59 @@ static void sdCloseCleanly(const char* why) {
   }
   sdError = true;
   sdRecoveryAttempts = SD_MAX_RECOVERY_ATTEMPTS;
+}
+
+// Close the current log and open the next one. Called from the flush slot in loop() so
+// the stall lands where one is already tolerated. Sequence: flush the RAM queue, close
+// (a full sync: last block, directory entry, FAT - from here the old file is complete
+// whatever happens next), pick the next name, open, write the boot records with a FRESH
+// RTC anchor (Issue 76), flush them. A half-built current block in RAM simply lands in
+// the new file with its own start timestamp, so nothing is lost at the seam.
+//
+// Failure policy: if the new file cannot be opened, the old one is already safely
+// closed, so degrade (sdError) rather than risk it - the recovery machine will retry.
+static void sdRotateIfDue(uint32_t nowMs) {
+#if SD_ROTATE_MINUTES > 0
+  if (sdError) return;
+  if (nowMs - sdFileOpenedMs < (uint32_t)SD_ROTATE_MINUTES * 60000UL) return;
+
+  sdFlushBuffered();
+  if (logFile) logFile.close();
+
+  uint8_t local[6];
+  rtcLocalNow(local);
+  char dir[6];
+  bool haveDir = sdDayFolder(local, dir);
+
+  char fname[20] = {0};
+  bool found = false;
+  if (local[0] + 2000 >= 2024) {
+    if (haveDir) snprintf(fname, sizeof(fname), "%s/%02u%02u%02u%02u.BIN", dir,
+                          (unsigned)local[1], (unsigned)local[2], (unsigned)local[3], (unsigned)local[4]);
+    else         snprintf(fname, sizeof(fname), "%02u%02u%02u%02u.BIN",
+                          (unsigned)local[1], (unsigned)local[2], (unsigned)local[3], (unsigned)local[4]);
+    found = !SD.exists(fname);          // same minute as an existing file -> counter name
+  }
+  if (!found) found = sdFindCounterName(haveDir ? dir : "", fname, sizeof(fname));
+  if (!found) {
+    setSdError("SD rotation: no unused filename");
+    sdRecoveryAttempts = SD_MAX_RECOVERY_ATTEMPTS;
+    return;
+  }
+
+  logFile = SD.open(fname, FILE_WRITE);
+  if (!logFile) {
+    setSdError("SD rotation: could not open the next log file");
+    return;                             // recovery machine stays armed
+  }
+  snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
+  sdFileOpenedMs = nowMs;
+  sdRotations++;
+  sdWriteBootRecords();                 // fresh RTC anchor + cal records, then flush
+  DBG_PRINT("Rotated to "); DBG_PRINTLN(fname);
+#else
+  (void)nowMs;
+#endif
 }
 
 // TYPE_TELEM_IMU (0x06) — 5 Hz IMU attitude + vertical displacement
@@ -1499,6 +1570,28 @@ struct __attribute__((packed)) StatusPacket {
 // inversion (needs 0x10), and no wall-clock anchor (needs 0x05).
 //
 // Returns false if any append failed, which means sdError was re-set underneath us.
+// Day folder "MMDD" for a local-time payload from rtcLocalNow(). Created if missing;
+// SD.mkdir() returns true when the directory already exists, so it is safe every time.
+// Returns false (and an empty string) when the RTC is not plausible or mkdir fails, in
+// which case callers put the file in the root instead of failing to log at all.
+static bool sdDayFolder(const uint8_t local[6], char out[6]) {
+  out[0] = 0;
+  if (local[0] + 2000 < 2024) return false;
+  snprintf(out, 6, "%02u%02u", (unsigned)local[1], (unsigned)local[2]);
+  return SD.mkdir(out);
+}
+
+// First unused LOGnnnnn.BIN under `dir` ("" = root). The no-overwrite rule setup() and
+// recovery both apply; factored so rotation applies it identically.
+static bool sdFindCounterName(const char* dir, char* out, size_t outLen) {
+  for (uint32_t n = 1; n <= 99999UL; n++) {
+    if (dir[0]) snprintf(out, outLen, "%s/LOG%05lu.BIN", dir, (unsigned long)n);
+    else        snprintf(out, outLen, "LOG%05lu.BIN", (unsigned long)n);
+    if (!SD.exists(out)) return true;
+  }
+  return false;
+}
+
 // Read the RTC now and convert to local time, into the 6-byte TYPE_RTC_EVENT layout.
 // The parser maps every timestamp in a file as  wall = rtc_fields + (ts_ms - rtc_ts_ms),
 // so the pair it is given must be SIMULTANEOUS. Re-emitting the boot-time fields with a
@@ -2319,15 +2412,22 @@ void setup() {
   // the required 8.3 names (12 visible characters plus NUL).
   char fname[20] = {0};
   bool filenameFound = false;
+  char dayDir[6] = {0};
+  bool haveDayDir = false;
 
   if (sdError) {
     // No card: nothing to name or open. Fall through to the rest of setup().
   } else if (localTimeValid) {
-    snprintf(fname, sizeof(fname), "%02d%02d%02d%02d.BIN",
-             localMonth,
-             localDay,
-             localHour,
-             (int)localMin);
+    // One folder per day, "MMDD". Created here for the first file; rotation reuses it.
+    snprintf(dayDir, sizeof(dayDir), "%02d%02d", localMonth, localDay);
+    haveDayDir = SD.mkdir(dayDir);
+    if (haveDayDir) {
+      snprintf(fname, sizeof(fname), "%s/%02d%02d%02d%02d.BIN", dayDir,
+               localMonth, localDay, localHour, (int)localMin);
+    } else {
+      snprintf(fname, sizeof(fname), "%02d%02d%02d%02d.BIN",
+               localMonth, localDay, localHour, (int)localMin);
+    }
 
     if (!SD.exists(fname)) {
       filenameFound = true;
@@ -2342,13 +2442,7 @@ void setup() {
   }
 
   if (!sdError && !filenameFound) {
-    for (uint32_t n = 1; n <= 99999UL; n++) {
-      snprintf(fname, sizeof(fname), "LOG%05lu.BIN", n);
-      if (!SD.exists(fname)) {
-        filenameFound = true;
-        break;
-      }
-    }
+    filenameFound = sdFindCounterName(haveDayDir ? dayDir : "", fname, sizeof(fname));
   }
 
   if (!sdError && !filenameFound) {
@@ -2369,7 +2463,11 @@ void setup() {
       setSdError("SD log file open failed");
     } else {
       snprintf(sdLogName, sizeof(sdLogName), "%s", fname);
+      sdFileOpenedMs = millis();
       DBG_PRINT("Logging to "); DBG_PRINTLN(fname);
+#if SD_ROTATE_MINUTES > 0
+      DBG_PRINT("Rotating every "); DBG_PRINT(SD_ROTATE_MINUTES); DBG_PRINTLN(" min of uptime.");
+#endif
     }
   }
 
@@ -3093,6 +3191,7 @@ void loop() {
   if (!sdError && nowMs - lastFlush >= FLUSH_INTERVAL_MS) {
     sdFlushBuffered();
     lastFlush = nowMs;
+    sdRotateIfDue(nowMs);       // right after a flush, so the seam costs one extra sync
   }
 
   // ---- 1 Hz debug print (USB_DEBUG mode only) -----------------------------

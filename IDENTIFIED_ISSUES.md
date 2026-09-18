@@ -3265,3 +3265,14 @@ Neither is compiled here.
    not SD 1.3.0.
 3. **A supercapacitor hold-up** with a power-fail interrupt — the hardware answer that makes
    every cut a clean close.
+
+
+**Addendum 2026-09-18 — "I just pull power and the file is fine."** Both statements are true
+and they are the same fact. `09111727.BIN`, which ended by a power cut, walks to **exactly** its
+last byte on a record boundary, and its size modulo 512 is 387 — a partial block written by a
+`sync()`, i.e. the 5-second flush. So the file *is* fine: it ends cleanly at the last flush,
+at most ~5 s before the cut, and parses without a truncation error. What is missing is the
+≤5 s after that flush, which nothing shows unless the last timestamp is compared with a clock.
+The rare case — a cut inside the few-millisecond directory write — does not appear in a
+handful of bench trials and is real over hundreds of cycles or on a marginal card; 5-minute
+rotation (U26, implemented) bounds it to one file.

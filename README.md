@@ -295,7 +295,10 @@ Only needed for `Calibration/calibrateMag.m` (R2019b or later, no toolboxes).
   bench session (live IMU over USB) possible. A card inserted after boot needs a reset.
 - Attempts GPS time sync for up to 120 s when `GPS_ENABLE 1`; skipped entirely when `0`.
   The RTC retains time from the previous power cycle if GPS is unavailable.
-- Creates a log file `MMDDHHMM.BIN` on the SD card. If that name already exists, or the RTC
+- Creates a folder for the day, `MMDD/`, and a log file `MMDDHHMM.BIN` inside it. **Every
+  `SD_ROTATE_MINUTES` (default 5) of uptime it closes that file and opens the next one**, so
+  a day is ~288 files of ~1.8 MB and a power cut can only ever touch the file that is open.
+  If the date-based name already exists, or the RTC
   year is earlier than 2024 (dead coin cell and no GPS), it falls back to the first unused
   `LOGnnnnn.BIN` so no existing log is ever appended to or overwritten.
 - Writes the boot calibration records (`0x08`, `0x09`, `0x0D`, `0x10`, `0x13`) and the RTC
@@ -349,8 +352,18 @@ sample. The retired 5 Hz point-sample packet read ~2.1× high on this bursty sig
 
 ### Step 1 — Retrieve the SD card
 
-Copy the `.BIN` file off the microSD card. The name is `MMDDHHMM.BIN` (month, day, hour,
-minute at the start of logging) or `LOGnnnnn.BIN` if the RTC was invalid.
+Copy the day folder (`MMDD/`) off the microSD card. Each file inside is `MMDDHHMM.BIN`
+(month, day, hour, minute at the moment that file was opened) or `LOGnnnnn.BIN` if the RTC
+was invalid. A run is the whole folder — parse it as one:
+
+```
+python vertisea_protocol.py 0915/
+```
+
+That writes the usual CSVs next to every `.BIN` **and** `0915_overview.csv`: one row per
+second across the whole run (battery, BME280, loop/SD health, per-second current mean and
+peak, wall-clock time). Open the overview first; go to a file's `_currentFast.csv` for the
+minutes that matter.
 
 ### Step 2 — Parse the binary log
 
@@ -514,6 +527,7 @@ to SD and therefore never appear as CSVs.
 | A deployment produced several `LOGnnnnn.BIN` files | Normal after an SD fault: each recovery opens a new file with a fresh copy of the calibration records. `sd_recoveries` in `_sysHealth.csv` counts them |
 | Everything looks fine but nothing works: LED blinks, `.BIN` is ~196 B, no telemetry | Apollo3 core 2.x. The blink is the mbed error handler, not the heartbeat. Build on core 1.2.1 — see §4 and Issue 59 |
 | Power was cut mid-run — what survived? | Everything up to the last `flush()` (every 5 s) is safe; up to ~5.2 s after it is lost; in rare cases the directory entry of the open file is damaged. Since 2026-09-18 the parser resynchronises past damaged bytes instead of stopping, so a bad sector costs only the records it covers. To make power-downs cost nothing, set `SAFE_STOP_PIN` (jumper → clean close, LED 8 pulses) or `BATTERY_SAFE_STOP_MV` (LED 9 pulses) in `config_local.h`. Issues 77–78 |
+| Pulled power mid-run and the file looks fine — so is there really a risk? | Yes, and both are true. `flush()` every 5 s syncs the directory entry, so the file always ends cleanly on a record boundary at most ~5 s before the cut (a real cut log ends *exactly* on a boundary, tail 387 B = a synced partial block). What you lose is those ≤5 s, invisible unless you check the clock. The rare case — a cut landing inside the few-ms directory write — is what rotation bounds to one file. Issue 78 |
 | A day-long log will not parse / the CSV will not open | Expected: 520 MB/day, and the parser holds 46× the file in RAM; `_currentFast.csv` exceeds Excel's row limit after 22 min. Rotate into 30-minute files — design and numbers in [`POTENTIAL_UPGRADES.md`](POTENTIAL_UPGRADES.md) U26. Until then, keep single runs under ~2 h |
 | Board appears dead at boot | Count the LED pulses: 1 = RTC, 2 = BME280, 3 = stab IMU, 4 = fixed IMU. A steady 1 Hz blink means it is running normally; **4 Hz means running without SD** — no card at boot, a full card, or a write failure — and telemetry still works. Solid ON means it is still inside `setup()`. There is still no watchdog — a halted board stays halted (Issue 47) |
 | Live telemetry over the buoy's own USB port shows N/A everywhere | Build with `TELEM_ENABLE 1`, `USB_TELEM 1` **and `USB_DEBUG 0`**. With `USB_DEBUG 1` the USB port carries debug text and packets go to `Serial1`. Confirmed on hardware 2026-09-12: flipping only `USB_DEBUG` from 1 to 0 turned every field live |

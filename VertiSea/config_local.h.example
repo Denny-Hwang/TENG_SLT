@@ -34,6 +34,11 @@
 // #define SD_BUFFERED_WRITE  1    // keep at 1
 // #define STAB_IMU_USES_MAG  0    // 1 enables 9-DOF fusion and the 0x07 record
 //
+// --- Log rotation (U26) -----------------------------------------------------------------
+//     Default is 5. Counted from boot. Each file ~1.8 MB, 288 a day, in a MMDD/ folder.
+//     0 = one file per boot (pre-2026-09-18 behaviour).
+// #define SD_ROTATE_MINUTES     5
+//
 // --- Clean-close protections (Issue 78) ----------------------------------------------
 //     Either turns a foreseeable power-down into a flushed, closed file. Blink code 8 / 9
 //     on the LED means "closed, safe to pull power".

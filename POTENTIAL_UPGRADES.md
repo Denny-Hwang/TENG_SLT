@@ -1484,7 +1484,19 @@ token/response/busy state machine. Preallocation may be revisited independently 
 maximum deployment size, safe truncation, metadata recovery, and intentional power-loss tests.
 
 
-## U26 — ⭐⭐⭐ Firmware + parser: rotate the log into 30-minute files, one folder per day
+## U26 — ✅ IMPLEMENTED 2026-09-18 — rotate the log into 5-minute files, one folder per day
+
+**As decided by the operator, differing from the proposal below in two ways:** **5 minutes**,
+not 30 — a 5-minute `_currentFast.csv` is ~240 000 rows, comfortably inside Excel — and
+**counted from boot**, not aligned to the wall clock, so boot is the start of the first full
+interval and filenames do not need to land on round minutes. `SD_ROTATE_MINUTES 5` is the
+committed default; 0 restores one-file-per-boot. Firmware: `sdRotateIfDue()` from the flush
+slot, `sdDayFolder()`, `sdFindCounterName()` shared with recovery, fresh RTC anchor per file
+(Issue 76). Parser: `python vertisea_protocol.py MMDD/` parses the folder as one run and
+writes `MMDD_overview.csv`. Not yet compiled or bench-verified — the 35-minute check below is
+the acceptance test. Original proposal follows for the reasoning.
+
+### (original proposal) rotate the log into 30-minute files, one folder per day
 
 **Question asked 2026-09-18:** how long can the current code log continuously, is the result a
 sensible size to download and open on Windows, and if not, how should storage be reorganised?

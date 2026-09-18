@@ -20,6 +20,7 @@ AND in `docs/binary_protocol.md`, in the same commit.
 Can also be run directly to convert logs without opening the GUI:
 
     python3 vertisea_protocol.py LOG00001.BIN [more.BIN ...]
+    python3 vertisea_protocol.py 0915/            # a rotated run: every .BIN + 0915_overview.csv
 """
 
 import bisect
@@ -1113,14 +1114,105 @@ def convert(bin_path: str) -> list:
     return written
 
 
+OVERVIEW_FIELDS = ('file', 'ts_ms', 'wall_time_local', 'battery_V', 'temperature_C',
+                   'pressure_Pa', 'humidity_pct', 'loop_max_us', 'sd_write_max_us',
+                   'sd_recoveries', 'hall_rejected', 'current_mean_mA', 'current_peak_mA',
+                   'current_samples')
+
+
+def overview_rows(data: dict, file_label: str) -> list:
+    """One row per second of a parsed file: the slow channels plus per-second current.
+
+    With 5-minute rotation (SD_ROTATE_MINUTES) a day is 288 files, and the full-rate CSVs
+    of a day add up to ~2.4 GB that nothing opens whole. This is the view you look at
+    FIRST - 86 400 rows for a day, opens anywhere - and the per-file _currentFast.csv is
+    where you go once the overview shows which minute mattered. Current is reduced to
+    mean and peak per second from the 800 Hz samples; charge is not included because the
+    HiRes pipeline in current_filter_test.py is where charge is computed correctly.
+    """
+    per_sec = {}
+    def bucket(ts):
+        return per_sec.setdefault(int(ts // 1000), {})
+    for r in data['battery_voltage']:
+        bucket(r['ts_ms'])['battery_V'] = r['voltage_V']
+    for r in data['bme']:
+        b = bucket(r['ts_ms'])
+        b['temperature_C'] = r['temperature']; b['pressure_Pa'] = r['pressure']
+        b['humidity_pct'] = r['humidity']
+    for r in data['sys_health']:
+        b = bucket(r['ts_ms'])
+        b['loop_max_us'] = r['loop_max_us']; b['sd_write_max_us'] = r['sd_write_max_us']
+        b['sd_recoveries'] = r['sd_recoveries']; b['hall_rejected'] = r['hall_rejected']
+    cur = {}
+    for r in data['current_fast']:
+        v = r['current_mA'] if r['current_mA'] is not None else r['counts']
+        c = cur.setdefault(int(r['ts_ms'] // 1000), [0.0, 0.0, 0])
+        c[0] += v; c[1] = max(c[1], v); c[2] += 1
+    for s, (tot, pk, n) in cur.items():
+        b = bucket(s * 1000)
+        b['current_mean_mA'] = tot / n; b['current_peak_mA'] = pk; b['current_samples'] = n
+    anchor = data['rtc_event'][0] if data['rtc_event'] else None
+    rows = []
+    for s in sorted(per_sec):
+        b = per_sec[s]
+        wall = ''
+        if anchor:
+            import datetime as _dt
+            try:
+                t0 = _dt.datetime(anchor['year'], anchor['month'], anchor['day'],
+                                  anchor['hour'], anchor['minute'], anchor['second'])
+                wall = (t0 + _dt.timedelta(milliseconds=s * 1000 - anchor['ts_ms'])
+                        ).isoformat(timespec='seconds')
+            except (ValueError, OverflowError):
+                wall = ''
+        row = {'file': file_label, 'ts_ms': s * 1000, 'wall_time_local': wall}
+        for k in OVERVIEW_FIELDS[3:]:
+            row[k] = b.get(k, '')
+        rows.append(row)
+    return rows
+
+
+def convert_directory(dir_path: str) -> list:
+    """Parse every *.BIN in a directory (one rotated run) and write one overview CSV.
+
+    Files are parsed one at a time and released, so a day of 5-minute files costs the
+    memory of one file (~85 MB parsed), not of the day. Per-file CSVs are written next to
+    each .BIN exactly as for a single file; the overview goes in the directory as
+    <dirname>_overview.csv. Returns every path written, the overview last.
+    """
+    bins = sorted(f for f in os.listdir(dir_path) if f.upper().endswith('.BIN'))
+    if not bins:
+        raise OSError(f"no .BIN files in {dir_path}")
+    written, rows = [], []
+    for name in bins:
+        path = os.path.join(dir_path, name)
+        data = parse_binary_file(path)
+        base = os.path.splitext(name)[0]
+        written += write_csvs_from_parsed(data, dir_path, base)
+        rows += overview_rows(data, name)
+        for msg in data['errors']:
+            print(f"  {name}: {msg}")
+        del data
+    label = os.path.basename(os.path.normpath(dir_path)) or 'run'
+    out = os.path.join(dir_path, f"{label}_overview.csv")
+    with open(out, 'w', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=OVERVIEW_FIELDS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    written.append(out)
+    return written
+
+
 def main(argv) -> int:
     if len(argv) < 2:
         print(__doc__.strip().split('\n\n')[-1])
         return 2
-    for bin_path in argv[1:]:
-        print(f"{bin_path}:")
+    for target in argv[1:]:
+        print(f"{target}:")
         try:
-            written = convert(bin_path)
+            # A directory is a rotated run: every .BIN inside, plus one overview CSV.
+            written = convert_directory(target) if os.path.isdir(target) else convert(target)
         except OSError as e:
             print(f"  ERROR: {e}")
             return 1

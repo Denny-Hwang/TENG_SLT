@@ -4,6 +4,25 @@ Newest first.
 
 ---
 
+## 2026-09-18 — 5-minute log rotation, one folder per day — `[UNCONFIRMED]`
+
+`SD_ROTATE_MINUTES` (default **5**, counted from boot): in the flush slot, `sdRotateIfDue()`
+flushes the RAM queue, closes the file (a full sync — the old file is complete from that
+instant), reads the RTC, creates or reuses the day folder `MMDD/`, opens `MMDD/MMDDHHMM.BIN`
+(counter name if that minute is taken), writes the boot records with a fresh RTC anchor
+(Issue 76) and flushes them. A half-built current block in RAM lands in the new file with its
+own timestamp, so the seam loses nothing. If the next file cannot be opened the old one is
+already safe, so it degrades and lets the recovery machine retry. `setup()` puts the first
+file in the day folder too and starts the rotation clock; recovery restarts it.
+`sdFindCounterName()` is now shared by setup, recovery and rotation. Explicit prototypes for
+the three late-defined static helpers, since the build broke once on ordering.
+
+Why 5 and why uptime: the operator's call — a 5-minute current CSV stays inside Excel's row
+limit, and boot is the natural origin of the first interval. Not compiled here; the
+declaration-order and preprocessor scans pass.
+
+---
+
 ## 2026-09-18 — Opt-in clean-close: stop jumper and low-battery threshold — `[UNCONFIRMED]`
 
 There is no clean shutdown; every power cut is unplanned and costs up to ~5 s plus a small

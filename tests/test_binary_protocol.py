@@ -29,6 +29,7 @@ USAGE
     python3 -m pytest tests/test_binary_protocol.py -q    # also works under pytest
 """
 
+import csv
 import os
 import struct
 import sys
@@ -574,6 +575,36 @@ class TestDerivedConversions(unittest.TestCase):
         self.assertTrue(any('DAMAGE' in e for e in data['errors']))
         self.assertEqual(data['sys_health'][-1]['ts_ms'], 29000)
         self.assertGreaterEqual(len(data['current_fast']), 30 * 8 * 100 - 100)
+
+    def test_directory_mode_writes_per_file_csvs_and_one_overview(self):
+        """A folder of rotated files is one run: per-file CSVs plus one 1 Hz overview."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for i, t0 in enumerate((0, 300000)):          # two 5-minute files, back to back
+                blob = record(vs.TYPE_RTC_EVENT, t0, bytes([26, 9, 18, 10, i * 5, 0]))
+                blob += current_cal(t0, vref=1.97225, adc_max=16383.0, div_ratio=1.0, sens=100.0)
+                blob += battery_cal(t0, 1.97710, 16383.0, 98900.0, 98800.0, 2.00101)
+                for s in range(3):
+                    t = t0 + 1000 * s
+                    blob += sys_health(t, loop_max_us=2000 + s)
+                    blob += record(vs.TYPE_BATTERY_VOLTAGE, t + 500, struct.pack('<H', 13600))
+                    blob += current_block(t, 124, tuple([9137] * 100))
+                with open(os.path.join(d, f"0918100{i}.BIN"), 'wb') as f:
+                    f.write(blob)
+            written = vs.convert_directory(d)
+            names = sorted(os.path.basename(p) for p in written)
+            self.assertIn('09181000_sysHealth.csv', names)
+            self.assertIn('09181001_sysHealth.csv', names)
+            overview = [p for p in written if p.endswith('_overview.csv')]
+            self.assertEqual(len(overview), 1)
+            with open(overview[0], newline='', encoding='utf-8') as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 6)                     # 3 s x 2 files
+            self.assertEqual({r['file'] for r in rows}, {'09181000.BIN', '09181001.BIN'})
+            self.assertAlmostEqual(float(rows[0]['current_mean_mA']), 9137 * 1.97225 * 100 / 16383, places=2)
+            self.assertEqual(rows[0]['wall_time_local'], '2026-09-18T10:00:00')
+            self.assertEqual(rows[3]['wall_time_local'], '2026-09-18T10:05:00')
+            self.assertAlmostEqual(float(rows[0]['battery_V']), 13600 * 1.97710 * 2.00101 / 16383, places=3)
 
     def test_zero_adc_max_is_reported_not_crashed(self):
         blob = (current_block(0, 9, tuple([1] * 10))

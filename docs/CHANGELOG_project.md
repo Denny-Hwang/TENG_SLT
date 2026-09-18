@@ -5,6 +5,20 @@ per-source-file changelogs. Newest first.
 
 ---
 
+## 2026-09-18 — Rotation implemented: 5 minutes from boot, folder per day
+
+The operator chose 5 minutes (a 5-minute current CSV opens in Excel) and uptime-based
+intervals (boot is the origin). Firmware rotates in the flush slot with a fresh RTC anchor per
+file; the parser takes a folder as one run and writes a 1 Hz `MMDD_overview.csv` — the
+first thing to open for a day, with per-second current mean/peak, battery, BME280 and health.
+
+On "I pull power and the file is fine": true, and consistent with the model. A real cut log
+ends exactly on a record boundary with a 387-byte synced tail — that is the 5-second flush
+doing its job. What is lost is the ≤5 s after the last flush, invisible without a clock, and
+the rare directory-write case that rotation now bounds to one file. Issue 78 addendum.
+
+---
+
 ## 2026-09-18 — Power loss: what survives, and two fixes
 
 Asked whether logging starts and stops on its own and whether a power cut can lose raw data.
