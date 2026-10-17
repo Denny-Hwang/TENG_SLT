@@ -4,6 +4,117 @@ Newest first.
 
 ---
 
+## 2026-10-17 - Offline Data Explorer - [UNCONFIRMED]
+
+Added Data Explorer to open an existing HDF5 archive without BIN import or a
+serial connection. The chooser starts at the last imported/opened archive.
+Opening the active live recorder is refused to avoid writer/reader confusion.
+Session actions use a separate toolbar row so connection controls remain usable.
+Explorer queries run in a worker with separate read-only HDF5 handles; live
+telemetry acquisition and importer/session implementations are unchanged.
+
+---
+
+## 2026-10-16 - Five Hz charging interval display - [UNCONFIRMED]
+
+Increased charging history to 600 points for the five Hz firmware statistics
+stream and common sixty-second view. Existing delta-charge/delta-integration
+calculation handles repeated integer window_s values within each second.
+No interpolation or smoothing added. Battery remains one Hz, using latest
+fresh voltage for interval power. Five GUI tests including 200 ms averages pass.
+
+---
+
+## 2026-10-16 - Charging range 200 mA and 800 mW - [UNCONFIRMED]
+
+Expanded fixed charging axes from 150 to 200 mA and 400 to 800 mW.
+The power limit corresponds to 200 mA at the existing 4 V battery upper limit.
+Numeric upper ticks are explicit. Conversion and interval averaging are unchanged.
+Four focused GUI regression tests passed; OSC measurement accuracy is not verified.
+
+---
+
+## 2026-10-16 - Live HDF5 and imported cycle workflow - [UNCONFIRMED]
+
+Connect starts timestamped live HDF5 in the project sessions directory only
+after serial open. Incoming chunks are recorded exactly once before the shared
+telemetry parser, regardless of Pause. Disconnect, link loss and window close
+close the writer; window closure also cancels scheduled polling. Recording
+failure shows a status/dialog but does not stop telemetry display. Existing
+CH340 warning remains before open; recording adds no pre-open file dialog.
+
+Shared live parser replaces duplicate radio struct layouts. Half-wrap timestamp
+handling prevents small out-of-order arrivals from adding false 655-second
+jumps. Accepted-time current interval calculation now calls the stdlib live
+helper; fixed axes and pause/resume behavior remain unchanged.
+
+Load BIN now imports HDF5 by default with no mass CSV output. Existing protocol
+CSV API/CLI is retained. Import Session selects multiple ordered BIN files;
+cancelling the file chooser offers recursive directory import. Analyze Cycle
+prompts native boot start/end seconds and reimports the last source manifest
+through import_session. Output replacement requires confirmation and cannot
+replace an active live recorder. Summary reports energy/coverage/flags. A
+separate three-panel I/P/measured-E figure separates source segments and preserves
+NaN energy gaps. PNG Description metadata retains source manifest, calibration,
+warnings, cycle summaries and full selected rows including analysis flags.
+Battery chemistry is not inferred. Import remains synchronous on Tk.
+
+Validation: 15 new synthetic live/GUI tests and four existing plot regressions
+pass; no hardware used. Cycle plotting/export test uses an explicitly labelled
+test-only fsync stub: the unchanged session importer currently fails on Windows
+at its read-only os.fsync call (vertisea_session.py line 223), reproduced by
+four existing session HDF5 tests. Normal GUI import reports that error visibly;
+the owning session module needs a writable-handle fsync fix before real import
+and cycle workflows can complete on this environment. No production workaround
+or changes outside this task's ownership were made.
+
+---
+
+## 2026-10-16 - Fixed ranges, common time, pause and snapshot - `[UNCONFIRMED]`
+
+User reported that dynamic y ranges were distracting. Restored +/-60 degree
+angle ranges; RPM is 0-1800, current 0-150 mA, power 0-400 mW and battery 0-4 V
+with explicit numeric ticks. All live plots display the same latest 60 seconds.
+IMU/RPM buffers retain 1200 points to cover this range at USB telemetry rates.
+Pause freezes plot lines, measurement labels and SD indicator while reception
+continues; Resume shows the latest buffered view. Snapshot saves the visible
+window as a timestamped PNG under snapshots, including Windows DPI correction.
+Snapshot captures screen pixels, so keep the window visible and unobscured.
+
+Four GUI regression tests pass; native PNG capture was executed and visually
+checked. Logging/protocol behavior is unchanged. The autoscale change below is
+replaced on user request, not a hardware calibration change.
+
+---
+
+## 2026-10-16 - Charging current, power and battery plots - `[UNCONFIRMED]`
+
+Replaced the unused bottom-right panel with three shared-time plots. Current is
+the change in cumulative charge divided by the change in accepted integration
+time, not the two-minute running average. Power estimates battery-side charging
+power using that current and a battery reading no older than 2.5 seconds.
+Statistics resets and packet gaps over 2.5 seconds break the current/power trace.
+The first statistics packet establishes a baseline. Histories retain 300 points.
+Reconnect clears the difference baseline and battery timestamp.
+
+Synthetic packet validation passed for 4 mA at 3.2 V (12.8 mW), resets, stale
+voltage and packet gaps. Hardware and full-cycle energy validation are pending.
+
+---
+
+## 2026-10-16 - Autoscale all plot y axes - `[REVERTED 2026-10-16]`
+
+Removed fixed angle limits of +/-60 degrees and the RPM limit of 450. All four
+y axes now follow the plotted data with 10 percent padding. The tilt-difference
+and RPM packet handlers now rescale y as well as x. Existing offline IMU plots
+also inherit the enabled y autoscaling.
+
+Validation: synthetic IMU and RPM packets processed by the GUI included angles
+outside the previous limits and 2400 RPM; all four axes contained the values
+with padding. Live hardware confirmation remains pending.
+
+---
+
 ## 2026-09-12 — Buoy-port dialog leads with the bench case — `[CONFIRMED]` for the build recipe
 
 The CH340 confirmation added on 2026-09-11 was written for the logging-run hazard and read as

@@ -471,10 +471,10 @@ constexpr float R2 =  7500.0f;   // low-side resistor  (Ω) — divider not curr
 constexpr float CURRENT_DIV_RATIO = 1.0f;   // no divider: ADC sees the sensor output directly
 
 // Current sensor scale factor: milliamps per volt of sensor output.
-// Measured value: 100 mA/V. With the ADC's 2.0 V reference and no divider, this
-// gives a full-scale range of 0–200 mA and an ADC resolution of
-// (2.0 / 16383) * 100 ≈ 0.012 mA per count.
-constexpr float CURRENT_SENS_MA_PER_V = 100.0f;   // mA per volt (measured)
+// With the 0.5 ohm sense resistor, sensitivity is 200 mA/V.
+// The calibrated reference gives a full-scale range of about 394.45 mA
+// and a resolution of about 0.024079 mA per count.
+constexpr float CURRENT_SENS_MA_PER_V = 200.0f;
 
 // Artemis Nano ADC configured for 14-bit resolution (0–16383 counts).
 // The Apollo3 ADC references its internal 2.0 V band-gap reference (the other
@@ -509,7 +509,7 @@ static_assert(ADC_GAIN_A15 > 0.95f && ADC_GAIN_A15 < 1.05f,
 // Single conversion factor from raw ADC counts to milliamps, derived from the
 // constants above. Used by both the SD path and the telemetry statistics.
 constexpr float COUNTS_TO_MA =
-    VREF_A14 * CURRENT_DIV_RATIO * CURRENT_SENS_MA_PER_V / ADC_MAX;   // ≈ 0.012039 mA/count
+    VREF_A14 * CURRENT_DIV_RATIO * CURRENT_SENS_MA_PER_V / ADC_MAX;   // ≈ 0.024079 mA/count
 
 // Battery-voltage divider on A15 (Apollo3 pad 32 / ADC SE4).
 //
@@ -667,6 +667,7 @@ constexpr uint32_t SD_SERVICE_SLACK_US = 1500UL;
 // over a 115200-baud link, the buoy reduces each window to peak and accumulated
 // totals and sends those. See CurrentStatsPacket.
 const unsigned long CURRENT_STATS_WINDOW_MS = 120000UL;  // 2 minutes
+const unsigned long CURRENT_STATS_INTERVAL_MS = 200UL;
 
 // Derived intervals (computed once at compile time)
 const unsigned long IMU_INTERVAL_US       = 1000000UL / IMU_RATE_HZ;   // µs between IMU samples
@@ -694,6 +695,10 @@ const unsigned long GPS_SYNC_TIMEOUT_MS   = 120000UL;
 // =============================================================================
 //  PACKET TYPE IDs  (1-byte type field at the start of every log record)
 // =============================================================================
+#ifndef LOG_RAW_AND_PROCESSED
+#define LOG_RAW_AND_PROCESSED 1
+#endif
+
 enum PacketType : uint8_t {
   TYPE_FIXED_IMU  = 0x01,  // hull-fixed IMU  — nominal 104 Hz, ~93 Hz achieved
   TYPE_STAB_IMU   = 0x02,  // stabilized IMU  — nominal 104 Hz, ~93 Hz achieved
@@ -719,7 +724,10 @@ enum PacketType : uint8_t {
   TYPE_IMU_RAW       = 0x12, // both IMUs, uncalibrated accel(int16 mg)+gyro(int32 mdps)
   TYPE_BATTERY_CAL   = 0x13, // battery ADC/divider constants — once at boot (SD only)
   TYPE_BATTERY_VOLTAGE = 0x14, // 1 Hz battery voltage — SD + telemetry
-  TYPE_SYS_HEALTH      = 0x15  // 1 Hz logging-health counters (SD only)
+  TYPE_SYS_HEALTH      = 0x15,
+  TYPE_DISPLACEMENT    = 0x16,
+  TYPE_STATS_SD       = 0x17,
+  TYPE_SESSION_META   = 0x18
 };
 
 // =============================================================================
@@ -1653,6 +1661,22 @@ bool sdWriteBootRecords() {
     { magCal.scale[0],  magCal.scale[1],  magCal.scale[2]  }
   };
   sdAppendRecord(TYPE_LPF_CAL, t, lpfCal);
+  struct __attribute__((packed)) SessionMeta {
+    uint16_t schema_version;
+    uint16_t flags;
+    int16_t utc_offset_minutes;
+    uint16_t imu_rate_hz;
+    uint16_t current_rate_hz;
+  } sessionMeta = {
+    1,
+    uint16_t((LOG_RAW_AND_PROCESSED ? 1 : 0) | (IMU_RAW_ONLY ? 2 : 0)
+             | (TELEM_ENABLE ? 4 : 0) | (USB_TELEM ? 8 : 0)
+             | (USB_DEBUG ? 16 : 0) | (GPS_ENABLE ? 32 : 0)
+             | (RPM_ENABLE ? 64 : 0) | (STAB_IMU_USES_MAG ? 128 : 0)),
+    int16_t(timezoneOffsetHours * 60), uint16_t(IMU_RATE_HZ), uint16_t(CURRENT_RATE_HZ)
+  };
+  static_assert(sizeof(SessionMeta) == 10, "Session metadata payload must be 10 bytes");
+  sdAppendRecord(TYPE_SESSION_META, t, sessionMeta);
 
   return sdFlushBuffered();   // get them on disk before anything else happens
 }
@@ -2773,7 +2797,7 @@ void loop() {
     // set sdError=true — subsequent SD writes are skipped, but telemetry
     // (TELEM_SERIAL) continues so the ground station keeps receiving data.
     if (!sdError) {
-#if IMU_RAW_ONLY
+#if IMU_RAW_ONLY || LOG_RAW_AND_PROCESSED
       // Compact path: one 38 B payload instead of 38+38+12 = 88 B, i.e. a 43 B
       // record instead of 103 B including headers.
       //
@@ -2801,10 +2825,9 @@ void loop() {
         lastFixedIMU.interval_us
       };
 
-      // Attitude is NOT logged here; recompute it offline from these values using the
-      // boot-time TYPE_FIXED_CAL / TYPE_STAB_CAL / TYPE_LPF_CAL records.
       sdAppendRecord(TYPE_IMU_RAW, nowMs, rawRec);
-#else
+#endif
+#if !IMU_RAW_ONLY || LOG_RAW_AND_PROCESSED
       struct __attribute__((packed)) ProcessedImuRecord {
         float pitch, roll, heading;
         float gx, gy, gz;
@@ -2844,6 +2867,7 @@ void loop() {
         sdAppendRecord(TYPE_MAG, nowMs, magRecord);
       }
 #endif  // IMU_RAW_ONLY
+      sdAppendRecord(TYPE_DISPLACEMENT, nowMs, vertDisp);
     }
   }
 
@@ -3069,14 +3093,14 @@ void loop() {
   }
 #endif  // RPM_ENABLE
 
-  // ---- 1 Hz windowed current statistics (radio) ---------------------------
-  // Sends the running peak / ∫I dt / ∫I² dt once per second. The accumulators
+  // ---- 5 Hz windowed current statistics (radio + SD) ----------------------
+  // Sends the running peak / ∫I dt / ∫I² dt every 200 ms. The accumulators
   // are reset only when the CURRENT_STATS_WINDOW_MS window closes, so each
-  // second the ground station sees the window filling up and then a fresh start.
-  // Sending every second (rather than once per window) means an operator who
-  // connects mid-window still sees data within a second instead of waiting up to
+  // update the ground station sees the window filling up and then a fresh start.
+  // Sending every 200 ms (rather than once per window) means an operator who
+  // connects mid-window still sees data promptly instead of waiting up to
   // two minutes.
-  if (nowMs - lastCurrentStatsSend >= 1000UL) {
+  if (nowMs - lastCurrentStatsSend >= CURRENT_STATS_INTERVAL_MS) {
     lastCurrentStatsSend = nowMs;
 
     uint32_t windowMs = (statWindowStartMs == 0) ? 0 : (nowMs - statWindowStartMs);
@@ -3093,6 +3117,11 @@ void loop() {
       currentDropped
     };
     TELEM_WRITE(statsPkt);
+    if (!sdError) {
+      sdAppendRecord(TYPE_STATS_SD, nowMs,
+                     reinterpret_cast<const uint8_t*>(&statsPkt) + 3,
+                     sizeof(statsPkt) - 3);
+    }
 
     // Close the window once it has run its full length. currentDropped is reset with
     // the rest of the window state: leaving it cumulative made it incomparable to the

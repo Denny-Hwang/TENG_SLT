@@ -6,14 +6,20 @@ radio/USB telemetry and drives the parser behind the "Load BIN File" button.
 """
 
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from collections import deque
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import serial
 import serial.tools.list_ports
-import struct
+import json
+import math
 import os
+import ctypes
+from ctypes import wintypes
+from datetime import datetime
+from pathlib import Path
+from PIL import ImageGrab
 
 # Single source of truth for everything on the read side of the binary protocol.
 # Only the radio-facing type IDs are imported: the SD-only types are used exclusively by
@@ -21,12 +27,13 @@ import os
 from vertisea_protocol import (
     TYPE_BME, TYPE_GPS, TYPE_TELEM_IMU, TYPE_STATUS, TYPE_RPM,
     TYPE_CURRENT_STATS, TYPE_BATTERY_VOLTAGE,
-    STATUS_FLAG_SD_ERROR, _CSV_SCHEMAS,
     parse_binary_file, write_csvs_from_parsed,
 )
+from vertisea_live import LiveRecorder, TelemetryParser, TimestampClock, current_interval_stats
 
 
 class VertiSeaGUI:
+    DISPLAY_SECONDS = 60.0
     # Placeholder shown in the port dropdown when no serial ports are enumerated.
     # connect_serial() rejects it rather than trying to open a port by this name.
     NO_PORTS = "<no serial ports>"
@@ -52,6 +59,18 @@ class VertiSeaGUI:
         root.title("VertiSea Telemetry Monitor")
         self.ser = None
         self.buffer = bytearray()
+        self.paused = False
+        self._frozen_view = None
+        self._live_display_values = None
+        self._telemetry_parser = TelemetryParser()
+        self._timestamp_clock = TimestampClock()
+        self.recorder = None
+        self.recording_error = None
+        self.session_directory = Path(__file__).resolve().parent / "sessions"
+        self._last_import_sources = None
+        self._last_session_path = None
+        self._closing = False
+        root.protocol("WM_DELETE_WINDOW", self.close_window)
 
         # ---- Connection controls -------------------------------------------
         conn_frame = tk.Frame(root)
@@ -68,6 +87,7 @@ class VertiSeaGUI:
         self.com_menu.pack(side=tk.LEFT, padx=(0, 5))
         tk.Button(conn_frame, text="Refresh", command=self.refresh_ports).pack(side=tk.LEFT)
         tk.Button(conn_frame, text="Connect", command=self.connect_serial).pack(side=tk.LEFT)
+        tk.Button(conn_frame, text="Disconnect", command=self.disconnect_serial).pack(side=tk.LEFT)
 
         # "Load BIN File" button — opens a file dialog and parses the SD binary log
         tk.Button(
@@ -75,6 +95,14 @@ class VertiSeaGUI:
             command=self.load_bin_file,
             bg="#2060a0", fg="white", font=("TkDefaultFont", 9, "bold")
         ).pack(side=tk.LEFT, padx=(10, 0))
+        session_frame = tk.Frame(root)
+        session_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+        tk.Button(session_frame, text="Import Session", command=self.import_session_dialog).pack(side=tk.LEFT)
+        tk.Button(session_frame, text="Analyze Cycle", command=self.analyze_cycle_dialog).pack(side=tk.LEFT)
+        tk.Button(session_frame, text="Data Explorer", command=self.data_explorer_dialog).pack(side=tk.LEFT, padx=5)
+        self.pause_button = tk.Button(conn_frame, text="Pause", command=self.toggle_pause)
+        self.pause_button.pack(side=tk.LEFT, padx=(5, 0))
+        tk.Button(conn_frame, text="Snapshot", command=self.save_snapshot).pack(side=tk.LEFT)
 
         # Link state. Without this the only evidence of a dropped serial link was plots
         # that stopped moving — indistinguishable from a calm sea. (Issue 44)
@@ -173,26 +201,27 @@ class VertiSeaGUI:
             tk.Label(energy_frame, textvariable=var).grid(row=i, column=1, sticky="w")
 
         # ---- Rolling plot data (live telemetry via radio) ------------------
-        self.time_data       = deque(maxlen=100)
-        self.pitch_data      = deque(maxlen=100)   # fixed IMU pitch
-        self.roll_data       = deque(maxlen=100)   # fixed IMU roll
-        self.disp_data       = deque(maxlen=100)   # vertical displacement
-        self.stab_pitch_data = deque(maxlen=100)   # stabilized IMU pitch
-        self.stab_roll_data  = deque(maxlen=100)   # stabilized IMU roll
+        self.time_data       = deque(maxlen=1200)
+        self.pitch_data      = deque(maxlen=1200)   # fixed IMU pitch
+        self.roll_data       = deque(maxlen=1200)   # fixed IMU roll
+        self.disp_data       = deque(maxlen=1200)   # vertical displacement
+        self.stab_pitch_data = deque(maxlen=1200)   # stabilized IMU pitch
+        self.stab_roll_data  = deque(maxlen=1200)   # stabilized IMU roll
         # IMU tilt-difference (fixed minus stabilized) — mechanical input proxy
-        self.diff_pitch_data = deque(maxlen=100)   # fix_pitch − stab_pitch (°)
-        self.diff_roll_data  = deque(maxlen=100)   # fix_roll  − stab_roll  (°)
+        self.diff_pitch_data = deque(maxlen=1200)   # fix_pitch − stab_pitch (°)
+        self.diff_roll_data  = deque(maxlen=1200)   # fix_roll  − stab_roll  (°)
         # RPM (arrives as separate TYPE_RPM packets — own time axis)
-        self.rpm_time_data   = deque(maxlen=100)
-        self.rpm_data        = deque(maxlen=100)   # rotor RPM
+        self.rpm_time_data   = deque(maxlen=1200)
+        self.rpm_data        = deque(maxlen=1200)   # rotor RPM
         self._latest_battery_v = None
         self._latest_i_avg_mA = None
-
-        # ts10 rollover compensation (fixes IDENTIFIED_ISSUES #16).
-        # ts10 is uint16 (0–65535), representing millis()/10 (~655 s range).
-        # When a backward jump is detected, add 65536 × 0.01 s to the offset.
-        self._ts10_last   = 0
-        self._ts10_offset = 0.0   # cumulative seconds added for each wrap
+        self._latest_battery_time = None
+        self._previous_current_stats = None
+        self.charging_time_data = deque(maxlen=600)
+        self.charging_current_data = deque(maxlen=600)
+        self.charging_power_data = deque(maxlen=600)
+        self.battery_time_data = deque(maxlen=300)
+        self.battery_voltage_data = deque(maxlen=300)
 
         # ---- Plot frames — 2×2 grid ----------------------------------------
         # Row 0: Fixed IMU (left) | Stabilized IMU (right)
@@ -207,7 +236,7 @@ class VertiSeaGUI:
         # Top-left — Fixed IMU Pitch & Roll (live radio telemetry)
         imu_fig = Figure(figsize=(5, 2.5))
         self.imu_ax = imu_fig.add_subplot(111)
-        self.imu_ax.set_title("Attitude: Pitch & Roll (pendulum IMU — live radio)")
+        self.imu_ax.set_title("Pendulum IMU: pitch & roll", fontsize=10)
         self.imu_ax.set_ylabel("degrees")
         self.imu_ax.set_ylim(-60, 60)
         self.imu_line1, = self.imu_ax.plot([], [], label="pitch", color="tab:blue")
@@ -224,13 +253,14 @@ class VertiSeaGUI:
         mech_fig = Figure(figsize=(5, 2.5))
         self.mech_ax  = mech_fig.add_subplot(111)  # left Y — tilt difference
         self.mech_ax2 = self.mech_ax.twinx()       # right Y — RPM
-        self.mech_ax.set_title("Mechanical Input: IMU Tilt Difference & Rotor RPM")
+        self.mech_ax.set_title("Tilt difference & rotor RPM", fontsize=10)
         self.mech_ax.set_ylabel("pendulum − buoy (°)", color="tab:red")
         self.mech_ax2.set_ylabel("RPM", color="tab:blue")
         self.mech_ax.tick_params(axis="y", labelcolor="tab:red")
         self.mech_ax2.tick_params(axis="y", labelcolor="tab:blue")
         self.mech_ax.set_ylim(-60, 60)
-        self.mech_ax2.set_ylim(0, 450)
+        self.mech_ax2.set_ylim(0, 1800)
+        self.mech_ax2.set_yticks([0, 600, 1200, 1800])
         self.mech_line_dpitch, = self.mech_ax.plot([], [], label="Δpitch", color="tab:red",    linestyle="-")
         self.mech_line_droll,  = self.mech_ax.plot([], [], label="Δroll",  color="tab:orange", linestyle="--")
         self.mech_line_rpm,    = self.mech_ax2.plot([], [], label="RPM",   color="tab:blue",   linestyle="-")
@@ -248,7 +278,7 @@ class VertiSeaGUI:
         # Bottom-left — Stabilized IMU Pitch & Roll (live radio telemetry)
         stab_fig = Figure(figsize=(5, 2.5))
         self.stab_ax = stab_fig.add_subplot(111)
-        self.stab_ax.set_title("Attitude: Pitch & Roll (buoy IMU — live radio)")
+        self.stab_ax.set_title("Buoy IMU: pitch & roll", fontsize=10)
         self.stab_ax.set_ylabel("degrees")
         self.stab_ax.set_ylim(-60, 60)
         self.stab_line_pitch, = self.stab_ax.plot([], [], label="pitch", color="tab:blue")
@@ -259,20 +289,123 @@ class VertiSeaGUI:
         stab_canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
         self.stab_canvas = stab_canvas
 
-        # Bottom-right — placeholder for future plot
-        placeholder = tk.Frame(plot_frame, bg="#1a1a2e", relief="sunken", bd=2)
-        placeholder.grid(row=1, column=1, sticky="nsew")
-        tk.Label(
-            placeholder,
-            text="[ Future Plot ]",
-            bg="#1a1a2e", fg="#555577",
-            font=("TkDefaultFont", 12, "italic")
-        ).place(relx=0.5, rely=0.5, anchor="center")
+        charging_fig = Figure(figsize=(5, 3.5))
+        self.charging_current_ax, self.charging_power_ax, self.battery_ax = \
+            charging_fig.subplots(3, 1, sharex=True)
+        self.charging_current_ax.set_title("Battery-side charging", fontsize=10)
+        self.charging_current_ax.set_ylabel("I (mA)")
+        self.charging_power_ax.set_ylabel("P (mW)")
+        self.battery_ax.set_ylabel("Battery (V)")
+        self.battery_ax.set_xlabel("Time since boot (s)")
+        self.charging_current_ax.set_ylim(0, 200)
+        self.charging_current_ax.set_yticks([0, 50, 100, 150, 200])
+        self.charging_power_ax.set_ylim(0, 800)
+        self.charging_power_ax.set_yticks([0, 200, 400, 600, 800])
+        self.battery_ax.set_ylim(0, 4.0)
+        self.battery_ax.set_yticks([0, 2, 4])
+        self.charging_current_line, = self.charging_current_ax.plot(
+            [], [], color="tab:green", drawstyle="steps-post")
+        self.charging_power_line, = self.charging_power_ax.plot(
+            [], [], color="tab:red", drawstyle="steps-post")
+        self.battery_line, = self.battery_ax.plot([], [], color="tab:blue")
+        for axis in (self.charging_current_ax, self.charging_power_ax, self.battery_ax):
+            axis.margins(y=0.1)
+            axis.grid(alpha=0.2)
+        charging_fig.tight_layout()
+        self.charging_canvas = FigureCanvasTkAgg(charging_fig, master=plot_frame)
+        self.charging_canvas.get_tk_widget().grid(row=1, column=1, sticky="nsew")
+        self._plot_axes = (
+            self.imu_ax, self.stab_ax, self.mech_ax, self.mech_ax2,
+            self.charging_current_ax, self.charging_power_ax, self.battery_ax,
+        )
+        self._plot_lines = (
+            self.imu_line1, self.imu_line2, self.stab_line_pitch, self.stab_line_roll,
+            self.mech_line_dpitch, self.mech_line_droll, self.mech_line_rpm,
+            self.charging_current_line, self.charging_power_line, self.battery_line,
+        )
+        self._display_vars = (
+            self.sats_var, self.lat_var, self.lon_var, self.press_var, self.hum_var,
+            self.temp_var, self.current_var, self.battery_var, self.rpm_var,
+            self.peak_var, self.charge_var, self.i2t_var, self.iavg_var,
+            self.irms_var, self.power_var, self.window_var, self.drops_var,
+        )
+        self._set_time_limits(0)
 
         # Kick off the update loop
-        root.after(100, self.update)
+        self._update_job = root.after(100, self.update)
 
     # -----------------------------------------------------------------------
+    def _set_time_limits(self, latest):
+        end = max(self.DISPLAY_SECONDS, latest)
+        for axis in self._plot_axes:
+            axis.set_xlim(end - self.DISPLAY_SECONDS, end)
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        self.pause_button.config(text="Resume" if self.paused else "Pause")
+        if self.paused:
+            self._frozen_view = (
+                [(list(line.get_xdata()), list(line.get_ydata())) for line in self._plot_lines],
+                [axis.get_xlim() for axis in self._plot_axes],
+                [variable.get() for variable in self._display_vars],
+                (self.sd_status_label.cget("text"), self.sd_status_label.cget("bg")),
+            )
+        else:
+            self._frozen_view = None
+            self._refresh_live_plots()
+            if self._live_display_values is not None:
+                values, sd_status = self._live_display_values
+                for variable, value in zip(self._display_vars, values):
+                    variable.set(value)
+                self.sd_status_label.config(text=sd_status[0], bg=sd_status[1])
+
+    def _refresh_live_plots(self):
+        datasets = (
+            (self.time_data, self.pitch_data), (self.time_data, self.roll_data),
+            (self.time_data, self.stab_pitch_data), (self.time_data, self.stab_roll_data),
+            (self.time_data, self.diff_pitch_data), (self.time_data, self.diff_roll_data),
+            (self.rpm_time_data, self.rpm_data),
+            (self.charging_time_data, self.charging_current_data),
+            (self.charging_time_data, self.charging_power_data),
+            (self.battery_time_data, self.battery_voltage_data),
+        )
+        for line, (times, values) in zip(self._plot_lines, datasets):
+            line.set_data(times, values)
+        latest = max((times[-1] for times, _ in datasets if times), default=0)
+        self._set_time_limits(latest)
+        for canvas in (self.imu_canvas, self.stab_canvas, self.mech_canvas, self.charging_canvas):
+            canvas.draw_idle()
+
+    def save_snapshot(self):
+        try:
+            directory = Path(__file__).resolve().parent / "snapshots"
+            directory.mkdir(exist_ok=True)
+            destination = directory / (datetime.now().strftime("vertisea_%Y%m%d_%H%M%S_%f") + ".png")
+            self.root.update_idletasks()
+            left, top = self.root.winfo_rootx(), self.root.winfo_rooty()
+            bounds = (left, top, left + self.root.winfo_width(), top + self.root.winfo_height())
+            if os.name == "nt":
+                user32 = ctypes.windll.user32
+                rectangle = wintypes.RECT()
+                user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+                previous_context = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+                try:
+                    if user32.GetWindowRect(self.root.winfo_id(), ctypes.byref(rectangle)):
+                        bounds = (rectangle.left, rectangle.top, rectangle.right, rectangle.bottom)
+                finally:
+                    if previous_context:
+                        user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous_context))
+            image = ImageGrab.grab(
+                bbox=bounds,
+                all_screens=True,
+            )
+            image.save(destination)
+            self.conn_status_var.set(f"Snapshot: {destination.name}")
+            return destination
+        except (OSError, RuntimeError) as error:
+            messagebox.showerror("Snapshot failed", str(error))
+            return None
+
     def refresh_ports(self):
         ports = [p.device for p in serial.tools.list_ports.comports()]
         menu = self.com_menu["menu"]
@@ -374,7 +507,14 @@ class VertiSeaGUI:
                 pass
             self.ser.open()
             self.buffer = bytearray()
+            self._telemetry_parser = TelemetryParser()
+            self._timestamp_clock = TimestampClock()
+            self._previous_current_stats = None
+            self._latest_battery_time = None
+            self._latest_battery_v = None
+            self._latest_i_avg_mA = None
             self.conn_status_var.set(f"Connected: {port}")
+            self._start_recording(port)
             messagebox.showinfo(
                 "Connected",
                 f"Opened {port} @115200 baud\n"
@@ -388,6 +528,7 @@ class VertiSeaGUI:
 
     def _close_serial(self):
         """Close the serial port if one is open, swallowing driver errors."""
+        self._close_recording()
         if self.ser is not None:
             try:
                 self.ser.close()
@@ -395,30 +536,59 @@ class VertiSeaGUI:
                 pass  # the device may already be gone; nothing useful to do about it
             self.ser = None
 
+    def _recording_failed(self, error):
+        self.recording_error = str(error)
+        self.conn_status_var.set(f"RECORDING ERROR: {error}")
+        messagebox.showerror("Live recording failed", str(error), parent=self.root)
+
+    def _start_recording(self, port):
+        self.recording_error = None
+        destination = self.session_directory / (
+            datetime.now().strftime("live_%Y%m%d_%H%M%S_%f") + ".h5")
+        try:
+            self.recorder = LiveRecorder(destination, port)
+            self.conn_status_var.set(f"Connected: {port}; recording {destination.name}")
+        except Exception as error:
+            self.recorder = None
+            self._recording_failed(error)
+
+    def _close_recording(self, reason="serial_closed"):
+        recorder, self.recorder = self.recorder, None
+        if recorder is not None:
+            try:
+                recorder.close(reason)
+            except Exception as error:
+                self._recording_failed(error)
+
+    def disconnect_serial(self):
+        self._close_serial()
+        if not self.recording_error:
+            self.conn_status_var.set("Not connected")
+
+    def close_window(self):
+        self._closing = True
+        if self._update_job is not None:
+            self.root.after_cancel(self._update_job)
+            self._update_job = None
+        self._close_serial()
+        self.root.destroy()
+
     def _on_link_lost(self, exc: Exception):
         """Handle the serial link disappearing mid-session (unplugged modem, driver reset).
 
         The GUI must keep running: a frozen-but-alive window is indistinguishable from a
         quiet sea state, which is the worst possible failure mode during a deployment.
         """
+        self._close_recording("link_lost: " + str(exc))
         self._close_serial()
         self._set_sd_status(False)
         self.sd_status_label.config(text=" LINK LOST ", bg="red")
-        self.conn_status_var.set(f"Disconnected: {type(exc).__name__}")
+        self.conn_status_var.set(f"Disconnected: {type(exc).__name__}" +
+                     (f"; RECORDING ERROR: {self.recording_error}" if self.recording_error else ""))
 
     def _monotonic_seconds(self, ts10: int) -> float:
-        """Convert a uint16 ts10 field to monotonic seconds since boot.
-
-        ts10 is millis()/10 and wraps every 655.36 s. Every packet type that carries a
-        ts10 must go through this one wrap counter — when only the 0x06 branch advanced
-        `_ts10_last`, the 0x0C (RPM) series could land a full 655 s away from the attitude
-        series around each wrap, because the two packets are emitted from different places
-        in loop() and can straddle the boundary in either order. (Issue 49)
-        """
-        if ts10 < self._ts10_last:
-            self._ts10_offset += 65536 * 0.01   # one full uint16 wrap = 655.36 s
-        self._ts10_last = ts10
-        return ts10 * 0.01 + self._ts10_offset
+        """Unwrap ts10 while retaining small out-of-order native timestamps."""
+        return self._timestamp_clock.seconds(ts10)
 
     def _set_sd_status(self, ok: bool):
         """Update the SD status indicator label colour and text."""
@@ -432,8 +602,7 @@ class VertiSeaGUI:
 
     # -----------------------------------------------------------------------
     def load_bin_file(self):
-        """Open a file dialog, parse the selected .BIN file, write CSVs, and
-        update the lower plot with the stabilized IMU pitch & roll data."""
+        """Import a single SD BIN to HDF5; CSV export remains a protocol API/CLI."""
         bin_path = filedialog.askopenfilename(
             title="Select VertiSea SD binary log",
             filetypes=[("Binary log", "*.BIN *.bin"), ("All files", "*.*")]
@@ -441,104 +610,186 @@ class VertiSeaGUI:
         if not bin_path:
             return  # user cancelled
 
+        result = self._import_sources([bin_path])
+        if result is not None:
+            messagebox.showinfo("Session imported", self._session_summary(result), parent=self.root)
+        return result
+
+    @staticmethod
+    def _session_summary(result):
+        summary = result["summary"]
+        lines = [f"HDF5: {result['output']}", f"Sources: {len(result['sources'])}",
+                 f"Measured energy: {summary['gross_energy_mJ']:.6g} mJ",
+                 f"Energy coverage: {summary['coverage_fraction']:.1%}",
+                 f"Cycles: {len(result['cycles'])}"]
+        if result["warnings"]:
+            lines.append("Warnings:\n" + "\n".join(result["warnings"]))
+        return "\n".join(lines)
+
+    def _import_sources(self, sources, cycle_start=None, cycle_end=None):
+        from vertisea_session import import_session
+        output = filedialog.asksaveasfilename(
+            title="HDF5 session output", defaultextension=".h5", initialdir=str(self.session_directory),
+            initialfile="session.h5", filetypes=[("HDF5 session", "*.h5 *.hdf5")], parent=self.root)
+        if not output:
+            return None
+        destination = Path(output).resolve()
+        if self.recorder is not None and destination == self.recorder.path:
+            messagebox.showerror("Output in use", "Cannot replace the active live recording.", parent=self.root)
+            return None
+        if destination.exists() and not messagebox.askyesno(
+                "Replace session?", f"Overwrite {destination}?", parent=self.root):
+            return None
         try:
-            data = parse_binary_file(bin_path)
-        except Exception as e:
-            messagebox.showerror("Parse Error", f"Failed to parse {bin_path}:\n{e}")
+            result = import_session(sources, output, cycle_start=cycle_start, cycle_end=cycle_end)
+        except Exception as error:
+            messagebox.showerror("Session import failed", str(error), parent=self.root)
+            return None
+        self._last_import_sources = [source["path"] for source in result["sources"]]
+        self._last_session_path = result["output"]
+        self.conn_status_var.set(f"Imported: {destination.name}")
+        return result
+
+    def import_session_dialog(self):
+        sources = filedialog.askopenfilenames(
+            title="Select ordered VertiSea BIN files", filetypes=[("Binary log", "*.BIN *.bin")],
+            parent=self.root)
+        if not sources:
+            directory = filedialog.askdirectory(title="Select BIN directory", parent=self.root)
+            if not directory:
+                return None
+            sources = [directory]
+        result = self._import_sources(sources)
+        if result is not None:
+            messagebox.showinfo("Session imported", self._session_summary(result), parent=self.root)
+        return result
+
+    def data_explorer_dialog(self):
+        from vertisea_explorer import open_explorer
+        previous = Path(self._last_session_path) if self._last_session_path else None
+        path = filedialog.askopenfilename(
+            title="Open HDF5 Data Explorer", parent=self.root,
+            initialdir=str(previous.parent if previous else self.session_directory),
+            initialfile=previous.name if previous else "session.h5",
+            filetypes=[("HDF5 session", "*.h5 *.hdf5")])
+        if not path:
+            return None
+        window = open_explorer(self.root, path,
+                               active_path=self.recorder.path if self.recorder is not None else None)
+        if window is not None:
+            self._last_session_path = str(Path(path).resolve())
+        return window
+
+    def analyze_cycle_dialog(self):
+        if not self._last_import_sources:
+            messagebox.showwarning("No imported session", "Import an SD BIN session first.", parent=self.root)
+            return None
+        start = simpledialog.askfloat("Cycle start", "Start (native boot seconds):", parent=self.root)
+        if start is None:
+            return None
+        end = simpledialog.askfloat("Cycle end", "End (native boot seconds):", parent=self.root)
+        if end is None:
+            return None
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            messagebox.showerror("Invalid cycle", "Enter finite start < end seconds.", parent=self.root)
+            return None
+        result = self._import_sources(self._last_import_sources, start, end)
+        if result is None:
+            return None
+        lines = [self._session_summary(result)]
+        for cycle in result["cycles"]:
+            lines.append(f"Cycle {cycle['cycle_id']} / source {cycle['segment_id']}: "
+                         f"{cycle['gross_energy_mJ']:.6g} mJ; "
+                         f"coverage {cycle['coverage_fraction']:.1%}; flags {cycle['flags']}")
+        messagebox.showinfo("Cycle analysis", "\n".join(lines), parent=self.root)
+        if result["cycles"]:
+            self._show_cycle_figure(result)
+        return result
+
+    def _show_cycle_figure(self, result):
+        import h5py
+        try:
+            with h5py.File(result["output"], "r") as archive:
+                rows = [json.loads(value) for value in archive["derived/charging/records_json"].asstr()[:]]
+                battery = {
+                    "calibration": [json.loads(value) for value in archive["meta/battery_cal/records_json"].asstr()[:]],
+                    "policy": str(archive["meta"].attrs["calibration_policy"]),
+                    "chemistry": "not inferred; see source deployment metadata",
+                }
+            figure = Figure(figsize=(9, 7))
+            axes = figure.subplots(3, 1, sharex=True)
+            export_metadata = {"cycles": result["cycles"], "battery": battery,
+                               "sources": result["sources"], "warnings": result["warnings"],
+                               "rows": []}
+            for cycle in result["cycles"]:
+                selected = [row for row in rows if row["boot_id"] == cycle["boot_id"]
+                            and row["segment_id"] == cycle["segment_id"]
+                            and cycle["start_ms"] <= row["ts_ms"] <= cycle["end_ms"]]
+                export_metadata["rows"].extend(selected)
+                times = [row["ts_ms"] / 1000 for row in selected]
+                energy = 0.0
+                energies = []
+                for index, row in enumerate(selected):
+                    if index and row["interval_valid"]:
+                        energy += row["energy_increment_mJ"]
+                    energies.append(energy if row["interval_valid"] else math.nan)
+                label = f"Cycle {cycle['cycle_id']}, source {cycle['segment_id']}"
+                for axis, values in zip(axes, ([row["current_mA"] for row in selected],
+                                               [row["power_mW"] for row in selected], energies)):
+                    axis.plot(times, values, label=label)
+            for axis, label in zip(axes, ("I (mA)", "P (mW)", "Measured E (mJ)")):
+                axis.set_ylabel(label)
+                axis.grid(alpha=0.2)
+                axis.legend(fontsize=8)
+            axes[-1].set_xlabel("Native boot time (s)")
+            figure.suptitle("Battery-side cycle analysis")
+            figure.tight_layout()
+            window = tk.Toplevel(self.root)
+            window.title("Cycle analysis")
+            canvas = FigureCanvasTkAgg(figure, master=window)
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            canvas.draw()
+            window.cycle_canvas = canvas
+            tk.Label(window, text=f"Battery calibration records: {len(battery['calibration'])}; "
+                     f"cycle flags: {[cycle['flags'] for cycle in result['cycles']]}").pack()
+            tk.Button(window, text="Export Figure", command=lambda: self._export_cycle_figure(
+                figure, export_metadata)).pack()
+        except Exception as error:
+            messagebox.showerror("Cycle plot failed", str(error), parent=self.root)
+
+    def _export_cycle_figure(self, figure, metadata):
+        output = filedialog.asksaveasfilename(title="Export cycle figure", defaultextension=".png",
+                                             filetypes=[("PNG image", "*.png")], parent=self.root)
+        if not output:
+            return None
+        try:
+            figure.savefig(output, dpi=180, metadata={
+                "Description": json.dumps(metadata, ensure_ascii=True, allow_nan=True)})
+            return output
+        except Exception as error:
+            messagebox.showerror("Figure export failed", str(error), parent=self.root)
+            return None
+
+    def _plot_current_interval(self, timestamp, window_s, charge_mC, integ_s, n_samples,
+                               i2t_mA2s=math.nan):
+        previous = self._previous_current_stats
+        current = dict(timestamp=timestamp, window_s=window_s, charge_mC=charge_mC,
+                       integ_s=integ_s, n_samples=n_samples, i2t_mA2s=i2t_mA2s)
+        result = current_interval_stats(previous, current, self._latest_battery_v,
+                                        self._latest_battery_time)
+        if previous is None or timestamp > previous["timestamp"]:
+            self._previous_current_stats = current
+        if previous is None:
             return
+        self.charging_time_data.append(timestamp)
+        self.charging_current_data.append(result["current_mA"])
+        self.charging_power_data.append(result["power_mW"])
+        self.charging_current_line.set_data(self.charging_time_data, self.charging_current_data)
+        self.charging_power_line.set_data(self.charging_time_data, self.charging_power_data)
+        for axis in (self.charging_current_ax, self.charging_power_ax):
+            axis.relim()
+            axis.autoscale_view()
 
-        # Write CSVs alongside the BIN file
-        out_dir   = os.path.dirname(bin_path)
-        base_name = os.path.splitext(os.path.basename(bin_path))[0]
-        try:
-            written = write_csvs_from_parsed(data, out_dir, base_name)
-        except Exception as e:
-            messagebox.showwarning("CSV Write Warning",
-                                   f"Parsed OK but could not write CSVs:\n{e}")
-            written = []
-
-        # Report genuine parse warnings only. Informational messages live in
-        # data['notes'] and are folded into the summary dialog instead, so that a
-        # warning popup always means something actually needs attention.
-        if data['errors']:
-            messagebox.showwarning(
-                "Parse Warnings",
-                f"{len(data['errors'])} warning(s) during parse:\n" +
-                "\n".join(data['errors'][:10]) +
-                ("\n…" if len(data['errors']) > 10 else "")
-            )
-
-        bin_fname = base_name + ".BIN"
-
-        # ---- Update upper plot with fixed IMU pitch & roll from BIN file ---
-        fixed_records = data.get('fixed_imu', [])
-        if fixed_records:
-            t_s     = [r['ts_ms'] / 1000.0 for r in fixed_records]
-            pitches = [r['pitch']           for r in fixed_records]
-            rolls   = [r['roll']            for r in fixed_records]
-            self.imu_line1.set_data(t_s, pitches)
-            self.imu_line2.set_data(t_s, rolls)
-            self.imu_ax.relim()
-            self.imu_ax.autoscale_view()
-            self.imu_ax.set_xlabel("time (s)")
-            self.imu_ax.set_title(
-                f"Attitude: Pitch & Roll (pendulum IMU — {bin_fname})"
-            )
-            self.imu_canvas.draw()
-
-        # ---- Update lower plot with stabilized IMU pitch & roll ------------
-        #
-        # A log from an IMU_RAW_ONLY=1 build legitimately has no 0x02 records — the
-        # firmware writes 0x12 instead — and that is the committed default. Warning about
-        # it taught operators to dismiss the dialog without reading it. Say what actually
-        # happened, only when there is genuinely no IMU data of either kind. (Issue 38)
-        stab_records = data.get('stab_imu', [])
-        if not stab_records:
-            if data.get('imu_raw'):
-                summary_note = (
-                    "No on-board attitude in this log: it was recorded by an "
-                    "IMU_RAW_ONLY=1 build, which logs uncalibrated TYPE_IMU_RAW (0x12) "
-                    "records instead of TYPE_FIXED_IMU/TYPE_STAB_IMU. Recompute pitch and "
-                    "roll offline from <base>_imuRaw.csv using <base>_calFixed.csv, "
-                    "<base>_calStab.csv and <base>_lpfCal.csv. The attitude plots stay "
-                    "empty — this is expected.")
-            else:
-                summary_note = (
-                    "This log contains no IMU records of any kind (neither 0x01/0x02 nor "
-                    "0x12). Check that the firmware's IMU init succeeded.")
-            data.setdefault('notes', []).append(summary_note)
-        else:
-            t_s     = [r['ts_ms'] / 1000.0 for r in stab_records]
-            pitches = [r['pitch']           for r in stab_records]
-            rolls   = [r['roll']            for r in stab_records]
-            self.stab_line_pitch.set_data(t_s, pitches)
-            self.stab_line_roll.set_data(t_s, rolls)
-            self.stab_ax.relim()
-            self.stab_ax.autoscale_view()
-            self.stab_ax.set_xlabel("time (s)")
-            self.stab_ax.set_title(
-                f"Attitude: Pitch & Roll (buoy IMU — {bin_fname})"
-            )
-            self.stab_canvas.draw()
-
-        # Summary message. Driven by _CSV_SCHEMAS rather than a parallel hard-coded list,
-        # so a newly added packet type appears here automatically. (Issue 51)
-        summary_lines = [f"Parsed: {os.path.basename(bin_path)}"]
-        for key in _CSV_SCHEMAS:
-            n = len(data.get(key, []))
-            if n:
-                summary_lines.append(f"  {key}: {n:,} records")
-        if written:
-            summary_lines.append(f"\nCSVs written ({len(written)}):")
-            for p in written:
-                summary_lines.append(f"  {os.path.basename(p)}")
-        if data.get('notes'):
-            summary_lines.append("\nNotes:")
-            for n in data['notes']:
-                summary_lines.append(f"  {n}")
-        messagebox.showinfo("Parse Complete", "\n".join(summary_lines))
-
-    # -----------------------------------------------------------------------
     def update(self):
         """Tk poll tick: drain the serial buffer, then repaint at most once.
 
@@ -554,12 +805,25 @@ class VertiSeaGUI:
             self._on_link_lost(e)
         finally:
             # Schedule next update (100 ms poll interval). Must never be skipped.
-            self.root.after(100, self.update)
+            if not self._closing:
+                self._update_job = self.root.after(100, self.update)
 
     def _update_once(self):
+        if self.paused and self._live_display_values is not None:
+            values, sd_status = self._live_display_values
+            for variable, value in zip(self._display_vars, values):
+                variable.set(value)
+            self.sd_status_label.config(text=sd_status[0], bg=sd_status[1])
         # Read all available bytes from the serial port
         if self.ser and self.ser.in_waiting:
-            self.buffer.extend(self.ser.read(self.ser.in_waiting))
+            chunk = self.ser.read(self.ser.in_waiting)
+            if self.recorder is not None:
+                try:
+                    self.recorder.feed(chunk)
+                except Exception as error:
+                    self._close_recording("recording_error")
+                    self._recording_failed(error)
+            self.buffer.extend(chunk)
 
         # Canvases touched this tick. Drawing is deferred until the buffer is fully
         # drained: a matplotlib draw() costs tens of milliseconds, and doing three of
@@ -568,8 +832,11 @@ class VertiSeaGUI:
         dirty = set()
 
         # Parse packets — consume as many complete packets as possible
-        while len(self.buffer) >= 1:
-            p = self.buffer[0]
+        records = self._telemetry_parser.feed(bytes(self.buffer))
+        self.buffer.clear()
+        for record in records:
+            p = record["packet_type"]
+            t = record["timestamp"]
 
             # ---- TYPE_TELEM_IMU (0x06) — 13 bytes -------------------------
             # Payload: uint16 ts10,
@@ -578,20 +845,11 @@ class VertiSeaGUI:
             #          int16 stab_pitch_cdeg, int16 stab_roll_cdeg (centidegrees ×100)
             # Angle scale ×100 supports ±327.67° without int16 overflow.
             if p == TYPE_TELEM_IMU:
-                if len(self.buffer) < 13:
-                    break  # wait for more data
-                pkt = self.buffer[:13]
-                del self.buffer[:13]
-                _, ts10, pitch_cdeg, roll_cdeg, disp_mm, stab_pitch_cdeg, stab_roll_cdeg = \
-                    struct.unpack('<BHhhhhh', pkt)
-                # Monotonic seconds since boot, via the shared wrap counter
-                # (fixes IDENTIFIED_ISSUES #16 and #49)
-                t          = self._monotonic_seconds(ts10)
-                pitch      = pitch_cdeg      / 100.0   # fixed IMU pitch (degrees)
-                roll       = roll_cdeg       / 100.0   # fixed IMU roll  (degrees)
-                disp       = disp_mm         / 1000.0  # vertical displacement (metres)
-                stab_pitch = stab_pitch_cdeg / 100.0   # stabilized IMU pitch (degrees)
-                stab_roll  = stab_roll_cdeg  / 100.0   # stabilized IMU roll  (degrees)
+                pitch = record["pitch"]
+                roll = record["roll"]
+                disp = record["displacement_m"]
+                stab_pitch = record["stab_pitch"]
+                stab_roll = record["stab_roll"]
                 self.time_data.append(t)
                 self.pitch_data.append(pitch)
                 self.roll_data.append(roll)
@@ -615,18 +873,14 @@ class VertiSeaGUI:
                 self.mech_line_dpitch.set_data(self.time_data, self.diff_pitch_data)
                 self.mech_line_droll.set_data(self.time_data, self.diff_roll_data)
                 self.mech_ax.relim()
-                self.mech_ax.autoscale_view(scaley=False)  # scroll x; y fixed at ±60°
+                self.mech_ax.autoscale_view()
                 dirty.update((self.imu_canvas, self.stab_canvas, self.mech_canvas))
                 continue
 
             # ---- TYPE_GPS (0x04) — 12 bytes (radio format) -----------------
             # Payload: uint16 ts10, uint8 sats, float lat, float lon
             elif p == TYPE_GPS:
-                if len(self.buffer) < 12:
-                    break
-                pkt = self.buffer[:12]
-                del self.buffer[:12]
-                _, ts10, sats, lat, lon = struct.unpack('<BHBff', pkt)
+                sats, lat, lon = record["satellites"], record["latitude"], record["longitude"]
                 self.sats_var.set(str(sats))
                 self.lat_var.set(f"{lat:.6f}")
                 self.lon_var.set(f"{lon:.6f}")
@@ -635,11 +889,7 @@ class VertiSeaGUI:
             # ---- TYPE_BME (0x03) — 15 bytes (radio format) -----------------
             # Payload: uint16 ts10, float pressure (Pa), float humidity (%), float temp (°C)
             elif p == TYPE_BME:
-                if len(self.buffer) < 15:
-                    break
-                pkt = self.buffer[:15]
-                del self.buffer[:15]
-                _, ts10, pres, hum, tmp = struct.unpack('<BHfff', pkt)
+                pres, hum, tmp = record["pressure"], record["humidity"], record["temperature"]
                 self.press_var.set(f"{pres/100.0:.1f} hPa")
                 self.hum_var.set(f"{hum:.1f} %")
                 self.temp_var.set(f"{tmp:.1f} °C")
@@ -650,13 +900,13 @@ class VertiSeaGUI:
             #          float charge_mC, float i2t_mA2s, float integ_s,
             #          uint32 n_samples, uint32 n_dropped
             elif p == TYPE_CURRENT_STATS:
-                if len(self.buffer) < 27:
-                    break
-                pkt = self.buffer[:27]
-                del self.buffer[:27]
-                (_, ts10, window_s, peak_mA, charge_mC, i2t_mA2s, integ_s,
-                 n_samples, n_dropped) = struct.unpack('<BHHHfffII', pkt)
+                window_s, peak_mA = record["window_s"], record["peak_mA"]
+                charge_mC, i2t_mA2s, integ_s = record["charge_mC"], record["i2t_mA2s"], record["integ_s"]
+                n_samples, n_dropped = record["n_samples"], record["n_dropped"]
 
+                self._plot_current_interval(
+                    t, window_s, charge_mC, integ_s, n_samples, i2t_mA2s)
+                dirty.add(self.charging_canvas)
                 self.peak_var.set(f"{peak_mA} mA")
                 self.charge_var.set(f"{charge_mC:.1f} mC")
                 self.i2t_var.set(f"{i2t_mA2s:.1f} mA\u00b2s")
@@ -676,7 +926,8 @@ class VertiSeaGUI:
                     # window average, which is unbiased. Labelled "avg" so it is not
                     # mistaken for an instantaneous reading.
                     self.current_var.set(f"{i_avg:.2f} mA avg")
-                    if self._latest_battery_v is not None:
+                    if (self._latest_battery_v is not None and self._latest_battery_time is not None
+                            and 0 <= t - self._latest_battery_time <= 2.5):
                         self.power_var.set(
                             f"{self._latest_battery_v * i_avg:.3f} mW")
                     else:
@@ -708,14 +959,19 @@ class VertiSeaGUI:
             # Payload: uint16 ts10, uint16 battery_mV. Calibration stays in the
             # SD-only 0x13 record; telemetry is already converted by firmware.
             elif p == TYPE_BATTERY_VOLTAGE:
-                if len(self.buffer) < 5:
-                    break
-                pkt = self.buffer[:5]
-                del self.buffer[:5]
-                _, ts10, battery_mV = struct.unpack('<BHH', pkt)
-                self._latest_battery_v = battery_mV / 1000.0
+                if self._latest_battery_time is not None and t < self._latest_battery_time:
+                    continue
+                self._latest_battery_v = record["voltage_V"]
+                self._latest_battery_time = t
+                self.battery_time_data.append(self._latest_battery_time)
+                self.battery_voltage_data.append(self._latest_battery_v)
+                self.battery_line.set_data(self.battery_time_data, self.battery_voltage_data)
+                self.battery_ax.relim()
+                self.battery_ax.autoscale_view()
+                dirty.add(self.charging_canvas)
                 self.battery_var.set(f"{self._latest_battery_v:.3f} V")
-                if self._latest_i_avg_mA is not None:
+                if (self._latest_i_avg_mA is not None and self._previous_current_stats is not None
+                    and 0 <= t - self._previous_current_stats["timestamp"] <= 2.5):
                     self.power_var.set(
                         f"{self._latest_battery_v * self._latest_i_avg_mA:.3f} mW")
                 continue
@@ -723,19 +979,15 @@ class VertiSeaGUI:
             # ---- TYPE_RPM (0x0C) — 5 bytes (radio format) ------------------
             # Payload: uint16 ts10, uint16 rpm
             elif p == TYPE_RPM:
-                if len(self.buffer) < 5:
-                    break
-                pkt = self.buffer[:5]
-                del self.buffer[:5]
-                _, ts10, rpm = struct.unpack('<BHH', pkt)
+                rpm = record["rpm"]
                 self.rpm_var.set(f"{rpm} RPM")
                 # Same wrap counter as every other ts10-bearing packet (Issue 49)
-                self.rpm_time_data.append(self._monotonic_seconds(ts10))
+                self.rpm_time_data.append(t)
                 self.rpm_data.append(rpm)
                 # Update third plot — RPM (right axis)
                 self.mech_line_rpm.set_data(self.rpm_time_data, self.rpm_data)
                 self.mech_ax2.relim()
-                self.mech_ax2.autoscale_view(scaley=False)  # scroll x; y fixed by set_ylim
+                self.mech_ax2.autoscale_view()
                 dirty.add(self.mech_canvas)
                 continue
 
@@ -743,26 +995,27 @@ class VertiSeaGUI:
             # Payload: uint16 ts10, uint8 flags
             #   flags bit 0 = sdError (0=OK, 1=SD write failure)
             elif p == TYPE_STATUS:
-                if len(self.buffer) < 4:
-                    break
-                pkt = self.buffer[:4]
-                del self.buffer[:4]
-                _, ts10, flags = struct.unpack('<BHB', pkt)
-                sd_ok = not bool(flags & STATUS_FLAG_SD_ERROR)
+                sd_ok = record["sd_ok"]
                 self._set_sd_status(sd_ok)
-                continue
-
-            # ---- Unknown / out-of-sync byte --------------------------------
-            # Drop one byte and try again. This handles framing errors and
-            # any packet types not yet implemented in this parser.
-            else:
-                del self.buffer[0]
                 continue
 
         # One repaint per canvas per tick, after the buffer is drained. draw_idle() lets
         # Tk coalesce repaints instead of blocking here. (Issue 48)
-        for canvas in dirty:
-            canvas.draw_idle()
+        if self.paused:
+            self._live_display_values = (
+                [variable.get() for variable in self._display_vars],
+                (self.sd_status_label.cget("text"), self.sd_status_label.cget("bg")),
+            )
+            line_data, limits, values, sd_status = self._frozen_view
+            for line, (times, samples) in zip(self._plot_lines, line_data):
+                line.set_data(times, samples)
+            for axis, limit in zip(self._plot_axes, limits):
+                axis.set_xlim(limit)
+            for variable, value in zip(self._display_vars, values):
+                variable.set(value)
+            self.sd_status_label.config(text=sd_status[0], bg=sd_status[1])
+        elif dirty:
+            self._refresh_live_plots()
 
 
 if __name__ == "__main__":

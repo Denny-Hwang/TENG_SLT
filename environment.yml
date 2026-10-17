@@ -45,6 +45,10 @@ dependencies:
   # nicer way to run them while iterating.
   - pytest
 
+  # Offline session storage only; imported lazily by vertisea_session.py.
+  - numpy>=1.23
+  - h5py>=3.8
+
   # Optional: catches undefined names and unused imports. Used during review; harmless to
   # drop if you want a smaller environment.
   - pyflakes

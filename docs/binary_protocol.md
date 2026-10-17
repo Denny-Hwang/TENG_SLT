@@ -1,3 +1,25 @@
+# Session logging extensions (2026-10-16)
+
+Existing layouts are unchanged. The following SD-only records retain the common
+`<BI` type and uptime-ms header. Firmware defaults LOG_RAW_AND_PROCESSED to 1,
+so 0x12 raw and 0x01/0x02 processed IMU records coexist at each IMU tick.
+Set LOG_RAW_AND_PROCESSED to 0 to restore the legacy IMU_RAW_ONLY selection.
+Sampling requests remain IMU 104 Hz and current 1000 Hz; achieved rates require
+hardware verification with the additional SD traffic.
+
+| ID | Payload format | Fields | Payload bytes |
+|---|---|---|---:|
+| 0x16 displacement | `<f` | vertical displacement in metres, each IMU tick | 4 |
+| 0x17 SD current stats | `<HHfffII` | window_s, peak_mA, charge_mC, i2t_mA2s, integ_s, n_samples, n_dropped; 5 Hz | 24 |
+| 0x18 session metadata | `<HHhHH` | schema_version=1, flags, UTC offset minutes, requested IMU Hz, requested current Hz; each file | 10 |
+
+Metadata flags: bit 0 raw+processed, bit 1 IMU_RAW_ONLY, bit 2 TELEM_ENABLE,
+bit 3 USB_TELEM, bit 4 USB_DEBUG, bit 5 GPS_ENABLE, bit 6 RPM_ENABLE, bit 7
+STAB_IMU_USES_MAG. Offset applies to the recorded local RTC calendar, not uptime.
+0x17 is exactly the existing telemetry statistics payload after its three-byte
+type/ts10 prefix; the telemetry 0x0F format is unchanged. Statistics are recorded
+before window reset even when GUI/telemetry is disabled.
+
 # Binary Packet Protocol
 
 > **Status:** Stable  

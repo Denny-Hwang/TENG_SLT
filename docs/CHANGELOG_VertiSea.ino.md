@@ -4,6 +4,43 @@ Newest first.
 
 ---
 
+## 2026-10-16 - Five Hz current statistics - [UNCONFIRMED]
+
+Changed the shared telemetry/SD statistics interval from 1000 to 200 ms.
+Current ADC request remains 1000 Hz and the cumulative window remains 120 s.
+Packet layouts and reset behavior are unchanged. Telemetry traffic for this
+packet increases from 27 to 135 bytes/s; SD stats from 29 to 145 bytes/s.
+Host 200 ms packet tests pass; firmware compile and achieved hardware rates
+still require verification after upload.
+
+---
+
+## 2026-10-16 - GUI-independent complete session recording - `[UNCONFIRMED]`
+
+LOG_RAW_AND_PROCESSED defaults to 1, preserving raw and processed IMU records
+in the same SD stream. New 0x16 saves vertical displacement at IMU rate; 0x17
+saves exact current statistics at 1 Hz independently of TELEM_ENABLE. 0x18 adds
+schema, deployment bits, timezone offset and requested rates to each file.
+Old layouts and current sampling request remain unchanged. Protocol/host tests
+pass but firmware compiler and hardware throughput validation are unavailable.
+IMU traffic increases from 43 to 138 bytes/tick (without magnetometer); actual
+rates and queue overruns must be verified before deployment. Setting
+LOG_RAW_AND_PROCESSED 0 restores the original raw-vs-processed selection.
+
+---
+
+## 2026-10-16 - Current scale for 0.5 ohm sense resistor - `[UNCONFIRMED]`
+
+Changed CURRENT_SENS_MA_PER_V from 100 to 200 for the reported resistor change
+from 1 ohm to 0.5 ohm with unchanged amplifier gain. Both telemetry statistics
+and the archived CURRENT_CAL record use this constant. ADC gain correction is
+unchanged. Calibrated full scale is about 394.45 mA (0.024079 mA/count).
+Requires rebuilding/uploading firmware; no firmware compiler validation here.
+Old logs keep their archived sensitivity. Post-swap logs captured with the old
+100 mA/V setting need separate correction, not a blanket rewrite of older logs.
+
+---
+
 ## 2026-09-18 — 5-minute log rotation, one folder per day — `[UNCONFIRMED]`
 
 `SD_ROTATE_MINUTES` (default **5**, counted from boot): in the flush slot, `sdRotateIfDue()`

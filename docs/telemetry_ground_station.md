@@ -97,6 +97,22 @@ are sent over the buoy's USB connection instead of the radio link. In this mode:
 
 ## Packet Parsing
 
+The bottom-right panel plots battery-side interval-average charging current,
+estimated charging power, and battery voltage on three shared-time axes. Current
+uses successive CURRENT_STATS charge and integration-time differences, normally
+about 0.2 seconds apart with the five Hz statistics firmware. Power uses the latest battery reading within 2.5 seconds;
+it is an estimate, not a high-rate instantaneous TENG power measurement. Window
+resets, insufficient integration and long packet gaps leave breaks in the trace.
+The first stats packet is only a baseline. Up to 600 charging points are retained.
+
+Plot ranges are fixed: angles +/-60 degrees, RPM 0-1800, charging current 0-200
+mA, power 0-800 mW and battery voltage 0-4 V. All live plots display the latest
+60 seconds on identical time limits. Values beyond these limits are clipped.
+Pause freezes the visible measurements and plots without stopping reception or
+the board's SD logging; Resume jumps to the latest buffered view. Snapshot saves
+a timestamped PNG in the project's snapshots directory. Keep the window visible
+and unobscured because snapshots capture screen pixels, not raw measurements.
+
 ### Architecture
 
 The parser is **frameless and byte-scanning**. There is no sync byte. The `update()`

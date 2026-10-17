@@ -58,6 +58,9 @@ TYPE_IMU_RAW   = 0x12   # both IMUs: accel int16 mg + gyro int32 mdps (SD only, 
 TYPE_BATTERY_CAL = 0x13  # once   battery ADC/divider constants (SD only)
 TYPE_BATTERY_VOLTAGE = 0x14  # 1 Hz battery voltage (SD + telemetry)
 TYPE_SYS_HEALTH = 0x15  # 1 Hz logging-health counters (SD only)
+TYPE_DISPLACEMENT = 0x16
+TYPE_STATS_SD = 0x17
+TYPE_SESSION_META = 0x18
 
 # Packet sizes for SD packets (bytes, including the 5-byte header: 1B type + 4B ts_ms)
 # TYPE_FIXED_IMU / TYPE_STAB_IMU : 5B header + 9×float + 1×uint16 = 43 B
@@ -136,6 +139,9 @@ TIMING_IMPLAUSIBLE_US = 60_000_000
 # SD binary parser — payload byte counts AFTER the 5-byte header
 # ---------------------------------------------------------------------------
 _SD_PAYLOAD_BYTES = {
+    TYPE_DISPLACEMENT: 4,
+    TYPE_STATS_SD: 24,
+    TYPE_SESSION_META: 10,
     TYPE_FIXED_IMU: 38,   # 9 floats + uint16 interval_us
     TYPE_STAB_IMU:  38,   # 9 floats + uint16 interval_us
     TYPE_BME:       12,   # 3 floats
@@ -211,6 +217,7 @@ def parse_binary_file(bin_path: str) -> dict:
         'current': [], 'current_cal': [], 'current_fast': [],
         'lpf_cal': [], 'hall_edge': [], 'imu_raw': [],
         'rpm': [], 'battery_cal': [], 'battery_voltage': [], 'sys_health': [],
+        'displacement': [], 'current_stats': [], 'session_meta': [],
         'errors': [], 'notes': []
     }
 
@@ -245,7 +252,29 @@ def parse_binary_file(bin_path: str) -> dict:
             # ---- TYPE_FIXED_IMU (0x01) or TYPE_STAB_IMU (0x02) — 38 payload bytes ----
             # Payload: 9 × float32 → pitch, roll, heading, gx, gy, gz, ax, ay, az
             #          + uint16 interval_us (measured µs since the previous IMU sample)
-            if pkt_type in (TYPE_FIXED_IMU, TYPE_STAB_IMU):
+            if pkt_type in (TYPE_DISPLACEMENT, TYPE_STATS_SD, TYPE_SESSION_META):
+                size = _SD_PAYLOAD_BYTES[pkt_type]
+                raw = fid.read(size)
+                byte_offset += len(raw)
+                if len(raw) != size:
+                    data['errors'].append(f"Truncated session record at offset {byte_offset}")
+                    break
+                record = {'ts_ms': ts_ms}
+                if pkt_type == TYPE_DISPLACEMENT:
+                    record['displacement_m'], = struct.unpack('<f', raw)
+                    key = 'displacement'
+                elif pkt_type == TYPE_STATS_SD:
+                    record.update(zip(
+                        ('window_s', 'peak_mA', 'charge_mC', 'i2t_mA2s',
+                         'integ_s', 'n_samples', 'n_dropped'), struct.unpack('<HHfffII', raw)))
+                    key = 'current_stats'
+                else:
+                    record.update(zip(
+                        ('schema_version', 'flags', 'utc_offset_minutes',
+                         'imu_rate_hz', 'current_rate_hz'), struct.unpack('<HHhHH', raw)))
+                    key = 'session_meta'
+                data[key].append(record)
+            elif pkt_type in (TYPE_FIXED_IMU, TYPE_STAB_IMU):
                 raw = fid.read(38)
                 byte_offset += len(raw)
                 if len(raw) < 38:
@@ -1024,6 +1053,11 @@ def _find_resync(buf, start, last_ts):
 # IMU_RAW_ONLY=1 build reported zero IMU records even though _imuRaw.csv was written
 # correctly. Adding a packet type must not require remembering a second list. (Issue 51)
 _CSV_SCHEMAS = {
+    'displacement': ('displacement', ('ts_ms', 'displacement_m')),
+    'current_stats': ('currentStats', ('ts_ms', 'window_s', 'peak_mA', 'charge_mC',
+                                     'i2t_mA2s', 'integ_s', 'n_samples', 'n_dropped')),
+    'session_meta': ('sessionMeta', ('ts_ms', 'schema_version', 'flags',
+                                    'utc_offset_minutes', 'imu_rate_hz', 'current_rate_hz')),
     'fixed_imu': ('imuFixed', _CSV_IMU_FIELDS),
     'stab_imu':  ('imuStab',  _CSV_IMU_FIELDS),
     'bme':       ('bme280',   ('ts_ms', 'pressure', 'humidity', 'temperature')),

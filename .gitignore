@@ -12,6 +12,8 @@ VertiSea/config_local.h
 
 # Generated / captured data — regenerable, never committed
 SampleData/
+sessions/
+snapshots/
 *.BIN
 *.bin
 debug.txt
